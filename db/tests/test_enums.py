@@ -48,6 +48,32 @@ def test_every_enum_has_a_paired_pg_type() -> None:
     assert len(_paired()) == 11
 
 
+def test_cancel_is_spelled_with_one_l_everywhere() -> None:
+    """The project spells it `canceled`.
+
+    It was split 2:1 before this test existed. The single-l spelling is not
+    arbitrary: Stripe's PaymentIntent status is `canceled`, so payment_status
+    maps across with no translation layer.
+    """
+    offenders = {
+        f"{enum_cls.__name__}.{member.name}": member.value
+        for _, enum_cls, _ in _paired()
+        for member in enum_cls
+        if "cancel" in member.value and member.value != "canceled"
+    }
+    assert not offenders, f"use 'canceled', not: {offenders}"
+
+
+def test_removal_is_a_timestamp_not_a_status() -> None:
+    """Withdrawal is recorded by users.deleted_at and content.archived_at.
+
+    A status value for it would encode the same fact as the timestamp column
+    beside it, with nothing keeping the two in agreement.
+    """
+    assert [m.value for m in enums.UserStatus] == ["active", "suspended"]
+    assert [m.value for m in enums.PublicationStatus] == ["draft", "published"]
+
+
 def test_user_roles_are_ordered_by_capability() -> None:
     assert list(enums.UserRole) == [
         enums.UserRole.VIEWER,
