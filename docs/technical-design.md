@@ -64,12 +64,12 @@ These came out of scoping and drive most of the decisions below:
 | Email | AWS SES (`boto3`) | Transactional only; always enqueued, never sent inline |
 | Server | Gunicorn (sync workers) behind nginx | |
 | Packaging | Docker + Docker Compose | Everything under `infra/` |
-| Repository | Monorepo: `ui/`, `api/`, `domain/`, `infra/`, `docs/` | See §2.3 and §12 |
+| Repository | Monorepo: `ui/`, `api/`, `db/`, `infra/`, `docs/` | See §2.3 and §12 |
 
 ### 2.1 Why these, briefly
 
 **Pydantic at the boundary, SQLAlchemy inside.** Request bodies parse into Pydantic models before
-touching a service function; services take and return domain objects; response models are separate
+touching a service function; services take and return ORM objects; response models are separate
 Pydantic classes built with `model_config = ConfigDict(from_attributes=True)`. Request and response
 models are never the same class — a `BreederListingUpdate` must not accept `id`, `owner_user_id`,
 or `status`.
@@ -83,7 +83,7 @@ we'd rather not own the decorator).
 **Services layer.** Blueprints stay thin: parse → call service → serialize. Business rules
 (application state machine, publishing, stock decrements) live in `api/app/services/` so they are
 testable without a request context and reusable from CLI commands and jobs. Persistence — the
-SQLAlchemy models and every query that touches them — lives in a separate `domain/` package that the
+SQLAlchemy models and every query that touches them — lives in a separate `db/` package that the
 service layer imports. §2.3 defines that boundary; §12 lays out the directories.
 
 ### 2.2 Runtime containers
@@ -107,12 +107,12 @@ ui/       browser client                        (no Python)
    ↓ HTTP
 api/      Flask routes · Pydantic schemas · services · integrations · jobs
    ↓ imports
-domain/   SQLAlchemy models · enums · repositories · Alembic migrations
+db/       SQLAlchemy models · enums · repositories · Alembic migrations
    ↓
 infra/    Dockerfiles, compose, nginx, deploy config      (no application code)
 ```
 
-**`domain/` knows nothing about the web.** It imports SQLAlchemy and the standard library. It must
+**`db/` knows nothing about the web.** It imports SQLAlchemy and the standard library. It must
 never import Flask, Pydantic, `stripe`, `boto3`, or anything from `api/`. A lint rule
 (`ruff` `flake8-tidy-imports` `banned-api`) enforces this in CI, because this boundary erodes the
 moment someone adds "just one" `pydantic` import for convenience.
@@ -127,8 +127,8 @@ The path of a single request:
 ```
 JSON body ─▶ ProductCreate            (api/app/schemas — request model, strict, extra="forbid")
           ─▶ service function          (api/app/services — business rules, transaction boundary)
-          ─▶ repository call           (domain/…/repositories — the only place queries are written)
-          ─▶ Product                   (domain/…/models — SQLAlchemy ORM object)
+          ─▶ repository call           (db/…/repositories — the only place queries are written)
+          ─▶ Product                   (db/…/models — SQLAlchemy ORM object)
           ─▶ ProductRead.model_validate(obj)   (api/app/schemas — response model, from_attributes)
           ─▶ JSON response
 ```
@@ -144,7 +144,7 @@ Rules that make this hold up in practice:
 3. **ORM objects never leave the route function.** They are converted to a response model inside
    the request's session scope. They are never returned from a route, cached, put on `g`, or
    handed to a background job — jobs receive ids and re-load.
-4. **Queries live only in `domain/…/repositories/`.** Services call
+4. **Queries live only in `db/…/repositories/`.** Services call
    `breeder_repo.get_published_by_slug(session, slug)`, not `session.execute(select(...))`. This is
    what makes the eager-loading rule below enforceable in one place instead of scattered across
    forty route handlers.
@@ -1159,7 +1159,7 @@ GPCA-V2/
 ├── ui/                          # frontend (out of scope for this document)
 │
 ├── api/                         # service layer — Flask, Pydantic, business rules
-│   ├── pyproject.toml           # depends on gpca-domain (path dependency)
+│   ├── pyproject.toml           # depends on gpca-db (path dependency)
 │   ├── app/
 │   │   ├── __init__.py          # create_app() factory
 │   │   ├── config.py            # pydantic-settings, env-driven, validated at boot
@@ -1167,7 +1167,7 @@ GPCA-V2/
 │   │   ├── errors.py            # AppError hierarchy + problem+json handlers
 │   │   ├── routes/v1/           # blueprints: auth, membership, breeders, events,
 │   │   │                        #   activities, pages, store, media, admin, webhooks
-│   │   ├── schemas/             # Pydantic ONLY — request + response models per domain
+│   │   ├── schemas/             # Pydantic ONLY — request + response models per resource
 │   │   ├── services/            # business rules, transaction boundaries, state machines
 │   │   ├── security/            # jwt, argon2, decorators, authorization
 │   │   ├── integrations/        # stripe_client, s3_client, ses_client
@@ -1179,13 +1179,13 @@ GPCA-V2/
 │       ├── unit/                # services with a fake repository
 │       └── integration/         # API against a real Postgres
 │
-├── domain/                      # db layer — SQLAlchemy + Alembic, no web framework
+├── db/                          # persistence layer — SQLAlchemy + Alembic, no web framework
 │   ├── pyproject.toml           # depends on sqlalchemy, alembic, psycopg — nothing else
 │   ├── alembic.ini
 │   ├── migrations/
-│   │   ├── env.py               # imports gpca_domain.models for autogenerate metadata
+│   │   ├── env.py               # imports gpca_db.models for autogenerate metadata
 │   │   └── versions/
-│   └── gpca_domain/
+│   └── gpca_db/
 │       ├── base.py              # DeclarativeBase, naming convention, TimestampMixin
 │       ├── enums.py             # StrEnum + the PG ENUM type objects
 │       ├── types.py             # UUIDv7 pk, Money, CIText, TSVector helpers
@@ -1203,25 +1203,24 @@ GPCA-V2/
 └── docs/
 ```
 
-`api/` declares `gpca-domain` as a path dependency (`{path = "../domain", develop = true}`), so the
-dependency direction is enforced by packaging, not convention: `domain/` cannot import `api/`
+`api/` declares `gpca-db` as a path dependency (`{path = "../db", develop = true}`), so the
+dependency direction is enforced by packaging, not convention: `db/` cannot import `api/`
 because it does not depend on it and never will.
 
-### 12.2 What `domain/` is, and what it is not
+### 12.2 What `db/` holds, and what it does not
 
-**`domain/` is a persistence package, not a DDD domain layer.** This is worth stating plainly,
-because the name invites an expectation this design deliberately does not meet: there are no
-aggregates, no entities-independent-of-storage, no repository interfaces with swappable
-implementations, and no business rules inside it. It holds the SQLAlchemy models, the queries that
-load them, and the migrations that create them. `db/` or `persistence/` would be a more honest
-name; keeping `domain/` is fine as long as everyone reads it as "the database layer".
+**`db/` is a persistence package, and the name is meant literally.** It is not a DDD domain layer:
+there are no aggregates, no entities-independent-of-storage, no repository interfaces with
+swappable implementations, and no business rules inside it. It holds the SQLAlchemy models, the
+queries that load them, and the migrations that create them — nothing else. It was called
+`domain/` in an earlier draft, which invited exactly the wrong expectation.
 
 The test for where a line of code belongs:
 
 > Does it need to know that HTTP, a logged-in user, Stripe, or an email exists? → `api/`
-> Does it need to know what a table looks like? → `domain/`
+> Does it need to know what a table looks like? → `db/`
 
-| Lives in `domain/` | Does **not** live in `domain/` |
+| Lives in `db/` | Does **not** live in `db/` |
 | --- | --- |
 | SQLAlchemy models: columns, relationships, constraints, indexes | Flask, Pydantic, `request`, `g`, blueprints |
 | Native enum types and their Python `StrEnum` mirrors | Authorization ("is this user the owner?") |
@@ -1236,9 +1235,9 @@ Concretely, "publish a breeder listing" splits like this:
 | --- | --- |
 | Parse and validate the request body | `api/app/schemas` |
 | Check the caller owns the listing | `api/app/security` |
-| Load the listing with its images | `domain/…/repositories/breeders.py` |
+| Load the listing with its images | `db/…/repositories/breeders.py` |
 | Reject if required fields are missing; merge draft; mint slug; write the revision row; commit | `api/app/services/breeders.py` |
-| The `breeder_listings` and `breeder_listing_revisions` tables themselves | `domain/…/models` |
+| The `breeder_listings` and `breeder_listing_revisions` tables themselves | `db/…/models` |
 | Serialize the result | `api/app/schemas` |
 
 **Repositories are query modules, not the Repository Pattern.** There is no `Repository[T]` base
@@ -1246,7 +1245,7 @@ class, no interface with a fake implementation, no unit-of-work abstraction. A r
 a flat set of functions that take a `Session` first and return models or scalars:
 
 ```python
-# domain/gpca_domain/repositories/breeders.py
+# db/gpca_db/repositories/breeders.py
 PUBLIC_LOAD = (
     selectinload(BreederListing.logo),
     selectinload(BreederListing.images).selectinload(BreederListingImage.media),
@@ -1265,7 +1264,7 @@ They exist for one reason: `lazy="raise"` (§12.4) means every access path must 
 loads, and `PUBLIC_LOAD` is that declaration written once instead of in every route that renders a
 listing. If that ever feels like ceremony, folding these functions into the services that call them
 is a change of import path and nothing else — the boundary that carries the weight is
-`domain/` vs `api/`, not services vs repositories.
+`db/` vs `api/`, not services vs repositories.
 
 ### 12.3 How the SQLAlchemy and Pydantic models interact
 
@@ -1351,7 +1350,7 @@ class BreederListingUpdate(BaseModel):
 @validate(response=BreederListingRead)
 def get_breeder(slug: str):
     with session_scope() as session:                                  # api/extensions
-        listing = breeder_repo.get_published_by_slug(session, slug)   # domain/repositories
+        listing = breeder_repo.get_published_by_slug(session, slug)   # db/repositories
         if listing is None:
             raise NotFound("breeder listing", slug)                   # api/errors
         return BreederListingRead.from_model(listing, media_urls())   # api/schemas
@@ -1397,7 +1396,7 @@ an internal CRUD tool over flat tables, the tradeoff would go the other way.
 
 ### 12.4 Strict SQLAlchemy models
 
-`domain/gpca_domain/models/` holds the only ORM classes in the system. "Strict" means specific
+`db/gpca_db/models/` holds the only ORM classes in the system. "Strict" means specific
 things:
 
 ```python
@@ -1446,10 +1445,10 @@ class BreederListing(Base):
 
 ### 12.5 Alembic migrations
 
-Alembic lives in `domain/` next to the models it tracks, and is the **only** way the schema
+Alembic lives in `db/` next to the models it tracks, and is the **only** way the schema
 changes — no `create_all()` anywhere outside a throwaway test fixture.
 
-- `env.py` imports `gpca_domain.models` so `target_metadata = Base.metadata` sees every table, and
+- `env.py` imports `gpca_db.models` so `target_metadata = Base.metadata` sees every table, and
   reads the URL from `DATABASE_URL` rather than `alembic.ini`, so the same migrations run in dev,
   CI and prod unchanged.
 - `context.configure(compare_type=True, compare_server_default=True, include_schemas=False)`.
@@ -1559,10 +1558,10 @@ optional location (§5.7).
 | Page schemas in code | Admin-authored page types | Matches the requirement: fixed structure per page type, new types are a dev request |
 | Separate image/link tables per entity | One polymorphic attachments table | Real foreign keys and cascades; duplication absorbed by mixins |
 | RQ | Celery | Six jobs; RQ is a fraction of the operational surface |
-| `domain/` separate from `api/`, enforced by packaging | One `app/` package with a `models/` folder | Makes the ORM/wire-model split structural — `domain/` cannot import Flask or Pydantic because it does not depend on them |
+| `db/` separate from `api/`, enforced by packaging | One `app/` package with a `models/` folder | Makes the ORM/wire-model split structural — `db/` cannot import Flask or Pydantic because it does not depend on them |
 | Distinct SQLAlchemy and Pydantic model families | Generated schemas (`sqlalchemy-pydantic`, `SQLModel`) | A column rename must not silently change the public API; the duplication is the safety property, not an accident |
 | `lazy="raise"` on every relationship | Default lazy loading | Turns N+1 queries and detached-instance bugs into import-time-obvious errors; forces explicit eager loading in repositories |
 | Typed columns for the application form | `jsonb` answers blob | Fixed, short question set that admins filter and export on; attestations deserve `NOT NULL` booleans |
 | Admin-editable settings in `app_settings`, keys fixed in code | Environment variables | Fee changes without a deploy, but admins still cannot invent keys |
 | Revocation archives listings automatically | Leave listings live until an admin acts | A revoked member should not keep a public directory listing; `archived_reason` makes it reversible |
-| Alembic in `domain/`, `alembic check` in CI | Migrations beside the app; autogenerate trusted | Migrations version the same package as the models, and CI catches a model edited without a migration |
+| Alembic in `db/`, `alembic check` in CI | Migrations beside the app; autogenerate trusted | Migrations version the same package as the models, and CI catches a model edited without a migration |
