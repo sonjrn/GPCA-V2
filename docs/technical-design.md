@@ -1141,8 +1141,8 @@ payment and endorsements arrive does not matter.
 | POST | `/media/{id}/complete` | U | Verify object, mark ready, queue derivatives |
 | PATCH | `/media/{id}` | O | Alt text / caption |
 | DELETE | `/media/{id}` | O | Only if unreferenced |
-| GET | `/health` | – | Liveness |
-| GET | `/health/ready` | – | DB + Redis + S3 reachability |
+| GET | `/health` | – | Liveness. **Unversioned** — infrastructure, not part of the client contract, so it does not move when `/api/v2` arrives |
+| GET | `/health/ready` | – | Readiness: DB + Redis + S3 reachability. Also unversioned |
 | GET | `/openapi.json` | – | Generated spec |
 
 ---

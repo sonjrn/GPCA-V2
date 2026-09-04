@@ -11,6 +11,10 @@ requires-python = ">=3.14"
 dependencies = [
     "gpca-db",
     "Flask>=3.1",
+    # Configuration only. This does NOT settle the request-validation choice
+    # (Pydantic vs marshmallow) still open on #5 -- pydantic-settings reads
+    # environment variables and is useful either way.
+    "pydantic-settings>=2.4",
 ]
 
 # Request validation and OpenAPI generation are added in #5, once the
@@ -20,6 +24,10 @@ dev = ["mypy>=1.10", "ruff>=0.5", "pytest>=8.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
 
 # Resolves the sibling package from the working tree for `uv sync`. Plain pip
 # does not read this key; install db first and the requirement is satisfied:
