@@ -332,16 +332,40 @@ migration, which is acceptable for these fixed vocabularies.
 | Type | Values |
 | --- | --- |
 | `user_role` | `viewer`, `member`, `admin` |
-| `user_status` | `active`, `suspended`, `deleted` |
+| `user_status` | `active`, `suspended` — removal is `users.deleted_at`, not a status |
 | `application_status` | `draft`, `submitted`, `ready_for_review`, `approved`, `rejected`, `withdrawn` |
-| `endorsement_status` | `pending`, `accepted`, `declined`, `cancelled` |
-| `publication_status` | `draft`, `published`, `archived` |
+| `endorsement_status` | `pending`, `accepted`, `declined`, `canceled` |
+| `publication_status` | `draft`, `published` — withdrawal is `archived_at`, not a status |
 | `media_status` | `pending`, `ready`, `failed` |
 | `payment_purpose` | `membership_application`, `merch_order` |
 | `payment_status` | `requires_payment`, `processing`, `succeeded`, `failed`, `canceled`, `refunded`, `partially_refunded` |
-| `order_status` | `pending_payment`, `paid`, `fulfilled`, `cancelled`, `refunded`, `partially_refunded` |
+| `order_status` | `pending_payment`, `paid`, `fulfilled`, `canceled`, `refunded`, `partially_refunded` |
 | `cart_status` | `active`, `converted`, `abandoned` |
 | `content_block_type` | `text`, `rich_text`, `image`, `link`, `list` |
+
+**Live state and withdrawal are separate axes.** An enum says what a row is
+*while it exists*; a nullable timestamp says whether and when it was withdrawn:
+
+| Entity | Enum (live state) | Withdrawal |
+| --- | --- | --- |
+| `users` | `active`, `suspended` | `deleted_at` |
+| Listings, events, activities, products | `draft`, `published` | `archived_at` (+ `archived_reason` on listings) |
+
+Collapsing these into one enum would put the same fact in two places — a
+`status = 'archived'` beside an `archived_at` column, with nothing keeping them
+in agreement. Splitting them also lets a *draft* be archived, which a
+three-value enum cannot express, and gives every withdrawal a time, which is
+what retention and purge jobs query on.
+
+Two consequences that must not be forgotten:
+
+- **Public reads filter on both:** `status = 'published' AND archived_at IS NULL`.
+  That pairing lives in the repository loaders (§12.2), not in routes, so no
+  endpoint can apply half of it.
+- **Uniqueness becomes partial where reuse should be allowed.** `users.email` is
+  unique `WHERE deleted_at IS NULL`, so a deleted account does not permanently
+  reserve its address. Slugs stay globally unique, because an archived listing
+  is expected to come back and must keep its URL.
 
 ### 5.3 Identity and auth tables
 
@@ -355,7 +379,8 @@ migration, which is acceptable for these fixed vocabularies.
 | `first_name`, `last_name` | `text` | |
 | `display_name` | `text NULL` | Falls back to `first_name last_name` |
 | `role` | `user_role` | default `viewer` |
-| `status` | `user_status` | default `active` |
+| `status` | `user_status` | default `active`; `active` or `suspended` only |
+| `deleted_at` | `timestamptz NULL` | Set on account deletion; excluded from every read |
 | `token_version` | `int` | default 0, bumped to invalidate live access tokens |
 | `email_verified_at` | `timestamptz NULL` | |
 | `phone` | `text NULL` | E.164 |
@@ -365,7 +390,7 @@ migration, which is acceptable for these fixed vocabularies.
 | `last_login_at` | `timestamptz NULL` | |
 | `created_at`, `updated_at` | | |
 
-Indexes: `UNIQUE(email)`; `(role) WHERE status = 'active'`; GIN trigram on
+Indexes: `UNIQUE(email) WHERE deleted_at IS NULL`; `(role) WHERE status = 'active' AND deleted_at IS NULL`; GIN trigram on
 `(first_name || ' ' || last_name)` for the sponsor picker.
 
 **`refresh_tokens`** — `id`, `user_id`, `token_hash` (`bytea`, unique), `family_id uuid`,
@@ -471,7 +496,7 @@ application's payment state is entirely `payment_id → payments.status`.
 
 Constraints: `UNIQUE(application_id, sponsor_user_id)`;
 `CHECK (sponsor_user_id <> applicant_user_id)` enforced in the service (the applicant column lives on
-the parent row); exactly two non-`cancelled` endorsements required to submit — enforced in the
+the parent row); exactly two non-`canceled` endorsements required to submit — enforced in the
 service, plus a partial unique index on `(application_id, slot)` where `slot IN (1,2)` to make the
 "two sponsors" rule structural rather than only procedural.
 
@@ -488,10 +513,11 @@ the right shape to gain `starts_on`/`ends_on` without restructuring.
 
 **Revocation cascades to listings.** Revoking a membership (or suspending the user) demotes the
 account to `viewer` **and archives every breeder listing they own** in the same transaction:
-`status = 'archived'`, `archived_at`, `archived_reason = 'membership_revoked'`. The listing leaves
+`archived_at = now()`, `archived_reason = 'membership_revoked'`, leaving `status` untouched at
+`published` so a restore does not have to guess what it was. The listing leaves
 the public directory immediately but is not deleted, and ownership is preserved — a re-granted
-membership calls `restore_listings_for(user)`, which returns listings archived for that reason to
-`published`, leaving ones an admin archived by hand alone. Both directions write `audit_log` rows.
+membership calls `restore_listings_for(user)`, which clears `archived_at` on listings archived for
+that reason, leaving ones an admin archived by hand alone. Both directions write `audit_log` rows.
 
 **Rejections and refunds.** Rejecting an application does not automatically refund. The admin
 rejection endpoint takes `refund: true|false`; when true it issues a full refund through the payment
@@ -510,7 +536,7 @@ are ordinary SQL. Unpublished edits live in `draft_content`.
 | `id` | `uuid` PK | |
 | `slug` | `citext` | `UNIQUE`, assigned at first publish |
 | `owner_user_id` | `uuid NULL → users` | `ON DELETE SET NULL`; null = unassigned |
-| `status` | `publication_status` | `draft` until first publish |
+| `status` | `publication_status` | `draft` until first publish; never `archived` — see `archived_at` |
 | `name` | `text` | Kennel/program name |
 | `logo_media_id` | `uuid NULL → media` | |
 | `description` | `text NULL` | Sanitized HTML (§5.10) |
@@ -523,14 +549,14 @@ are ordinary SQL. Unpublished edits live in `draft_content`.
 | `draft_content` | `jsonb NULL` | Pending edits; `NULL` = no unpublished changes |
 | `draft_updated_at`, `draft_updated_by` | | |
 | `published_at`, `last_published_by` | | |
-| `archived_at` | `timestamptz NULL` | |
+| `archived_at` | `timestamptz NULL` | Non-null = withdrawn from the directory, whatever `status` says |
 | `archived_reason` | `text NULL` | `membership_revoked` \| `admin` \| `owner_request` — drives auto-restore (§5.4) |
 | `search_vector` | `tsvector` GENERATED | See §7 |
 | `created_at`, `updated_at`, `created_by_user_id` | | |
 
 Indexes:
 - `UNIQUE(slug)`
-- `(country_code, state_code) WHERE status = 'published'` — the location filter
+- `(country_code, state_code) WHERE status = 'published' AND archived_at IS NULL` — the location filter
 - GIN on `search_vector`
 - GIN trigram on `name`
 - `(owner_user_id)`
@@ -555,15 +581,16 @@ Admin-authored, filterable by location and searchable by keyword. No registratio
 `starts_at timestamptz`, `ends_at timestamptz NULL`, `is_all_day bool`, `timezone text`
 (IANA, e.g. `America/Chicago`), `venue_name`, `address_line1/2`, `city`, `state_province`,
 `state_code`, `country_code`, `postal_code`, `latitude/longitude numeric NULL`,
-`hero_media_id NULL`, `status publication_status`, `published_at`, `search_vector`,
+`hero_media_id NULL`, `status publication_status`, `published_at`, `archived_at NULL`, `search_vector`,
 `created_by_user_id`, `updated_by_user_id`, timestamps.
 
 `timezone` is stored alongside the UTC instants because "9 a.m. at the show site" must render
 correctly regardless of the viewer's location — `timestamptz` alone loses the intended local wall
 clock. `CHECK (ends_at IS NULL OR ends_at >= starts_at)`.
 
-Indexes: `UNIQUE(slug)`; `(starts_at) WHERE status='published'` (upcoming feed);
-`(country_code, state_code, starts_at) WHERE status='published'`; GIN on `search_vector`.
+Indexes: `UNIQUE(slug)`; `(starts_at) WHERE status='published' AND archived_at IS NULL` (upcoming
+feed); `(country_code, state_code, starts_at) WHERE status='published' AND archived_at IS NULL`;
+GIN on `search_vector`.
 
 **`event_images`** — `id`, `event_id` (cascade), `media_id`, `caption`, `sort_order`.
 **`event_links`** — `id`, `event_id` (cascade), `label`, `url`, `sort_order`, `link_type NULL`
@@ -652,7 +679,7 @@ and every consumer — API, emails, exports — benefits.
 ### 5.11 Store
 
 **`products`** — `id`, `slug` (unique), `name`, `summary NULL`, `description NULL`,
-`status publication_status`, `category text NULL`, `sort_order int`, `is_member_only bool`
+`status publication_status`, `archived_at NULL`, `category text NULL`, `sort_order int`, `is_member_only bool`
 (default false — a hook for member-priced or member-restricted items), `search_vector`,
 audit columns.
 
@@ -717,7 +744,7 @@ Available stock is `stock_quantity - SUM(active reservations)`; see §9.3 for th
 | `shipping_method` | `text NULL` | |
 | `tracking_carrier`, `tracking_number`, `tracking_url` | `text NULL` | |
 | `customer_note`, `internal_note` | `text NULL` | |
-| `placed_at`, `paid_at`, `fulfilled_at`, `cancelled_at` | `timestamptz NULL` | |
+| `placed_at`, `paid_at`, `fulfilled_at`, `canceled_at` | `timestamptz NULL` | |
 | `cart_id` | `uuid NULL` | Provenance |
 
 Indexes: `UNIQUE(order_number)`; `(user_id, placed_at DESC)`; `(status, placed_at DESC)`;
@@ -782,7 +809,8 @@ validated on write against the same Pydantic model as the columns:
   published columns.
 - `POST /breeders/{id}/publish` applies `draft_content` onto the columns, reconciles the gallery
   against `breeder_listing_images`, appends a `breeder_listing_revisions` snapshot, sets
-  `status='published'` and `published_at`, clears `draft_content`, and — on first publish — mints
+  `status='published'` and `published_at`, clears `draft_content` (and `archived_at`, so publishing
+an archived listing restores it), and — on first publish — mints
   the slug. All in one transaction.
 - `POST /breeders/{id}/discard-draft` sets `draft_content = NULL`.
 
@@ -798,7 +826,7 @@ which is exactly the state an admin-created blank listing starts in.
 Same idea at block granularity — `value` is live, `draft_value` is pending — but publishing is
 scoped to the whole page so a page never appears half-updated. Events, activities and products have
 no draft overlay: admins edit them directly and control visibility with
-`status` (`draft` → `published` → `archived`), which is sufficient because there is no second party
+`status` (`draft` → `published`) plus `archived_at`, which is sufficient because there is no second party
 whose edits need staging.
 
 ### 6.3 Why not a revision-per-edit model
@@ -946,7 +974,7 @@ checks availability, and inserts reservations. On `payment_intent.succeeded` the
 flagged rather than allowed to oversell.
 
 Reservations expire after 30 minutes. A job releases expired reservations and cancels the
-corresponding `pending_payment` orders; a late-arriving webhook for a cancelled order re-checks
+corresponding `pending_payment` orders; a late-arriving webhook for a canceled order re-checks
 stock and, if it can no longer be honored, refunds automatically and notifies an admin.
 
 ### 9.4 Idempotency
@@ -1539,7 +1567,8 @@ Still unresolved, in rough order of how much they block implementation:
    the current fee and currency for the seed row?
 6. **`site.contact_email`** — needed to seed `app_settings` and the email templates.
 
-Answered since the first draft: checkout is online only, so the offline-payment path is gone
+Answered since the first draft: removal is a timestamp rather than an enum value, and the project
+spells it `canceled` (§5.2); checkout is online only, so the offline-payment path is gone
 (§5.4); membership fee is an admin-editable DB row (§5.3); application fields are typed columns
 (§5.4); revoked memberships archive owned listings (§5.4); email is AWS SES (§11); activities carry
 optional location (§5.7).
@@ -1563,5 +1592,6 @@ optional location (§5.7).
 | `lazy="raise"` on every relationship | Default lazy loading | Turns N+1 queries and detached-instance bugs into import-time-obvious errors; forces explicit eager loading in repositories |
 | Typed columns for the application form | `jsonb` answers blob | Fixed, short question set that admins filter and export on; attestations deserve `NOT NULL` booleans |
 | Admin-editable settings in `app_settings`, keys fixed in code | Environment variables | Fee changes without a deploy, but admins still cannot invent keys |
+| Live state as an enum, withdrawal as a timestamp | One enum carrying `archived`/`deleted` too | Same fact in two places otherwise (`status='archived'` beside `archived_at`); a timestamp records *when*, which retention jobs need, and lets a draft be archived |
 | Revocation archives listings automatically | Leave listings live until an admin acts | A revoked member should not keep a public directory listing; `archived_reason` makes it reversible |
 | Alembic in `db/`, `alembic check` in CI | Migrations beside the app; autogenerate trusted | Migrations version the same package as the models, and CI catches a model edited without a migration |
