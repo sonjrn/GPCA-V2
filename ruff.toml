@@ -1,0 +1,37 @@
+# Root lint/format configuration, inherited by every package.
+# db/ruff.toml extends this file and adds the import-boundary rules.
+
+target-version = "py312"
+line-length = 100
+src = ["api", "db"]
+
+exclude = [".git", ".venv", "venv", "__pycache__", "build", "dist", "ui"]
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "TID",  # flake8-tidy-imports (TID251 powers the db/ import ban)
+    "PTH",  # flake8-use-pathlib
+    "ARG",  # flake8-unused-arguments
+    "RUF",  # ruff-specific
+]
+# The formatter owns line breaking; E501 only fires on strings and comments it
+# cannot wrap, where it is noise rather than signal.
+ignore = ["E501"]
+
+[lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+[lint.isort]
+known-first-party = ["app", "gpca_db"]
+
+[format]
+docstring-code-format = true

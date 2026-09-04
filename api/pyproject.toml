@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gpca-api"
+version = "0.1.0"
+description = "GPCA service layer: Flask routes, schemas, services and integrations."
+requires-python = ">=3.12"
+
+dependencies = [
+    "gpca-db",
+    "Flask>=3.1",
+]
+
+# Request validation and OpenAPI generation are added in #5, once the
+# Pydantic-vs-marshmallow decision is settled. Nothing here should presume it.
+[project.optional-dependencies]
+dev = ["mypy>=1.10", "ruff>=0.5", "pytest>=8.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# Resolves the sibling package from the working tree for `uv sync`. Plain pip
+# does not read this key; install db first and the requirement is satisfied:
+#   pip install -e ./db && pip install -e ./api
+[tool.uv.sources]
+gpca-db = { path = "../db", editable = true }

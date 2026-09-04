@@ -1,32 +1,45 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
 *.so
-*.dylib
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
 
-# Test binary, built with `go test -c`
-*.test
+# Virtual environments. Anchored to the repository root: an unanchored `env/`
+# would also exclude infra/env/, and a file inside an excluded directory cannot
+# be re-included by a later negation.
+.venv/
+venv/
+/env/
 
-# Code coverage profiles and other test artifacts
-*.out
-coverage.*
-*.coverprofile
-profile.cov
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# --- Node / frontend --------------------------------------------------------
+node_modules/
+.vite/
+ui/dist/
 
-# Go workspace file
-go.work
-go.work.sum
-
-# env file
+# --- Secrets ----------------------------------------------------------------
+# infra/env/.env.example is the tracked template; real values never are.
 .env
+.env.*
+!.env.example
+!infra/env/.env.example
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# --- Editors / OS -----------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
