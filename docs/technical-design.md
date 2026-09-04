@@ -61,8 +61,10 @@ These came out of scoping and drive most of the decisions below:
 | Object storage | S3-compatible (MinIO in dev, S3/R2/Spaces in prod) | |
 | Payments | Stripe (Checkout Sessions + webhooks) | See §9 |
 | Background jobs | RQ + Redis | Small job surface; see §11 |
+| Email | AWS SES (`boto3`) | Transactional only; always enqueued, never sent inline |
 | Server | Gunicorn (sync workers) behind nginx | |
-| Packaging | Docker + Docker Compose | |
+| Packaging | Docker + Docker Compose | Everything under `infra/` |
+| Repository | Monorepo: `ui/`, `api/`, `domain/`, `infra/`, `docs/` | See §2.3 and §12 |
 
 ### 2.1 Why these, briefly
 
@@ -79,8 +81,10 @@ framework (`flask-smorest` is marshmallow-based; `spectree` is a viable off-the-
 we'd rather not own the decorator).
 
 **Services layer.** Blueprints stay thin: parse → call service → serialize. Business rules
-(application state machine, publishing, stock decrements) live in `app/services/` so they are
-testable without a request context and reusable from CLI commands and jobs.
+(application state machine, publishing, stock decrements) live in `api/app/services/` so they are
+testable without a request context and reusable from CLI commands and jobs. Persistence — the
+SQLAlchemy models and every query that touches them — lives in a separate `domain/` package that the
+service layer imports. §2.3 defines that boundary; §12 lays out the directories.
 
 ### 2.2 Runtime containers
 
@@ -92,6 +96,60 @@ nginx  →  api (gunicorn/flask)  →  postgres
 ```
 
 `api` and `worker` run the same image with different entrypoints.
+
+### 2.3 Layer boundaries and model separation
+
+The repository is a monorepo of four code layers plus docs. Dependencies point in one direction
+only — a lower layer never imports a higher one:
+
+```
+ui/       browser client                        (no Python)
+   ↓ HTTP
+api/      Flask routes · Pydantic schemas · services · integrations · jobs
+   ↓ imports
+domain/   SQLAlchemy models · enums · repositories · Alembic migrations
+   ↓
+infra/    Dockerfiles, compose, nginx, deploy config      (no application code)
+```
+
+**`domain/` knows nothing about the web.** It imports SQLAlchemy and the standard library. It must
+never import Flask, Pydantic, `stripe`, `boto3`, or anything from `api/`. A lint rule
+(`ruff` `flake8-tidy-imports` `banned-api`) enforces this in CI, because this boundary erodes the
+moment someone adds "just one" `pydantic` import for convenience.
+
+**Two model families, never one.** SQLAlchemy models are persistence types; Pydantic models are
+wire types. They are defined in different packages, and there is no base class, mixin, or generator
+shared between them. That duplication is the point: a column rename must not silently change the
+public API, and an API field must not force a schema change.
+
+The path of a single request:
+
+```
+JSON body ─▶ ProductCreate            (api/app/schemas — request model, strict, extra="forbid")
+          ─▶ service function          (api/app/services — business rules, transaction boundary)
+          ─▶ repository call           (domain/…/repositories — the only place queries are written)
+          ─▶ Product                   (domain/…/models — SQLAlchemy ORM object)
+          ─▶ ProductRead.model_validate(obj)   (api/app/schemas — response model, from_attributes)
+          ─▶ JSON response
+```
+
+Rules that make this hold up in practice:
+
+1. **Request and response models are distinct classes.** `BreederListingUpdate` has no `id`,
+   `owner_user_id`, `status`, or `published_at` — fields a client must not be able to set are
+   absent from the request type, so mass assignment is impossible by construction rather than by
+   a filter someone might forget.
+2. **Request models are strict:** `model_config = ConfigDict(extra="forbid", strict=True,
+   str_strip_whitespace=True)`. A typo'd field is a 422, not a silently ignored key.
+3. **ORM objects never leave the route function.** They are converted to a response model inside
+   the request's session scope. They are never returned from a route, cached, put on `g`, or
+   handed to a background job — jobs receive ids and re-load.
+4. **Queries live only in `domain/…/repositories/`.** Services call
+   `breeder_repo.get_published_by_slug(session, slug)`, not `session.execute(select(...))`. This is
+   what makes the eager-loading rule below enforceable in one place instead of scattered across
+   forty route handlers.
+5. **Conversion is explicit.** `ProductRead.model_validate(obj)` at the boundary, never a generic
+   `to_dict()` on the ORM model, and never `jsonify(orm_object)`.
 
 ---
 
@@ -280,6 +338,7 @@ migration, which is acceptable for these fixed vocabularies.
 | `publication_status` | `draft`, `published`, `archived` |
 | `media_status` | `pending`, `ready`, `failed` |
 | `payment_purpose` | `membership_application`, `merch_order` |
+| `payment_option` | `online_card`, `check_by_mail` |
 | `payment_status` | `requires_payment`, `processing`, `succeeded`, `failed`, `canceled`, `refunded`, `partially_refunded` |
 | `order_status` | `pending_payment`, `paid`, `fulfilled`, `cancelled`, `refunded`, `partially_refunded` |
 | `cart_status` | `active`, `converted`, `abandoned` |
@@ -319,6 +378,22 @@ Index `(user_id, revoked_at)`; a nightly job deletes rows past `expires_at + 30 
 Partial unique index on `(user_id, purpose) WHERE consumed_at IS NULL` so a new request invalidates
 the outstanding one.
 
+**`app_settings`** — admin-editable configuration that must change without a deploy, one row per
+key: `key text PK`, `value jsonb`, `value_type` (`int` | `string` | `bool` | `money` | `json`),
+`label`, `description`, `updated_by_user_id`, `updated_at`. Seeded by migration from a code-side
+registry (`SETTING_DEFS`) that declares each key's type, validation and default, so an admin can
+change a value but not invent a key — the same containment idea as the page-block registry (§5.8).
+
+Initial keys: `membership.fee_cents`, `membership.currency`,
+`membership.required_endorsements` (default 2), `membership.check_payable_to`,
+`membership.check_mailing_address`, `store.currency`, `store.reservation_ttl_minutes`,
+`site.contact_email`.
+
+Reads go through a cached accessor (`settings.get_int("membership.fee_cents")`, 60-second Redis TTL,
+busted on write) so a hot path never hits the table. Every write records an `audit_log` row with the
+previous and new value — a fee change is exactly the kind of thing that gets questioned six months
+later.
+
 **`audit_log`** — every privileged action: `id`, `actor_user_id`, `action` (`membership.approved`,
 `listing.owner_changed`, `order.refunded`, `user.role_changed`), `object_type`, `object_id`,
 `changes jsonb`, `ip inet`, `created_at`. Written by a service helper, never by the ORM directly.
@@ -331,29 +406,66 @@ members** as sponsors. When the payment has succeeded *and* both endorsements ar
 application becomes `ready_for_review`; an admin then approves or rejects. Approval grants the
 `member` role.
 
-**`membership_applications`**
+**`membership_applications`** — the form fields are real typed columns, not a `jsonb` blob. The
+question set is fixed and short, admins need to filter and export on it, and `18 or older` and
+`AKC good standing` are attestations worth having as first-class `boolean NOT NULL` columns rather
+than keys that might be absent.
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `uuid` PK | |
 | `applicant_user_id` | `uuid → users` | |
 | `status` | `application_status` | default `draft` |
-| `fee_cents`, `currency` | | Snapshot of the fee at submission time |
-| `payment_id` | `uuid NULL → payments` | |
-| `answers` | `jsonb` | Questionnaire responses; the question set is versioned in code |
-| `form_version` | `int` | Which question set `answers` was captured against |
-| `applicant_snapshot` | `jsonb` | Name/address/phone as submitted, frozen for the record |
+| **Applicant details** | | |
+| `first_name`, `last_name` | `text` | Copied from the account but independently editable |
+| `email` | `citext` | Contact address for the application; may differ from the login email |
+| `phone` | `text` | E.164 |
+| `address_line1` | `text` | |
+| `address_line2` | `text NULL` | |
+| `city`, `state_province`, `state_code`, `postal_code`, `country_code` | | |
+| `occupation` | `text NULL` | |
+| `kennel_name` | `text NULL` | Optional — not every applicant breeds |
+| `website_url` | `text NULL` | Validated as `http(s)` |
+| **Attestations** | | |
+| `is_18_or_older` | `boolean NOT NULL` | `CHECK` on submit, not on insert (see below) |
+| `akc_good_standing` | `boolean NOT NULL` | Applicant attests to good standing with the AKC |
+| `attested_at` | `timestamptz NULL` | When the applicant checked both boxes |
+| **Payment** | | |
+| `payment_option` | `payment_option` | `online_card` or `check_by_mail` |
+| `fee_cents`, `currency` | `int`, `char(3)` | Snapshot of `membership.fee_cents` at submission |
+| `payment_id` | `uuid NULL → payments` | Online payments only |
+| `offline_payment_reference` | `text NULL` | Check number / deposit reference |
+| `offline_payment_received_at` | `timestamptz NULL` | Set by an admin |
+| `offline_payment_recorded_by` | `uuid NULL → users` | |
+| **Workflow** | | |
 | `submitted_at`, `ready_at` | `timestamptz NULL` | |
 | `decided_at`, `decided_by_user_id` | | |
 | `decision_note` | `text NULL` | Shown to the applicant on rejection |
 | `internal_note` | `text NULL` | Admin-only |
+| `form_version` | `int` | Which revision of the form this was captured against |
 | `created_at`, `updated_at` | | |
 
 Constraints:
 - Partial unique index `(applicant_user_id) WHERE status IN ('draft','submitted','ready_for_review')`
   — at most one open application per user.
-- `CHECK (status <> 'approved' OR payment_id IS NOT NULL)`.
+- `CHECK (status = 'draft' OR (is_18_or_older AND akc_good_standing))` — both attestations are
+  required to leave `draft`, but a half-filled draft can still be saved.
+- `CHECK (status <> 'approved' OR payment_id IS NOT NULL OR offline_payment_received_at IS NOT NULL)`.
+- `CHECK (payment_option <> 'online_card' OR offline_payment_received_at IS NULL)`.
 - The applicant must be `email_verified` and must not already be a `member` (service check).
+
+`form_version` exists so that when the form changes, older applications are still interpretable —
+a new required field is added as nullable, backfilled where possible, and validated only for
+`form_version >= n` in the service. Typed columns plus a version integer gets the auditability of a
+form snapshot without the query pain of `jsonb`.
+
+**Payment options.** The paper form's "payment options and info" is modeled as a choice between
+paying online (Stripe Checkout, §9.1) and mailing a check. **We never store payment instrument
+details** — no card numbers, no bank details — regardless of option. For `check_by_mail` the
+application shows the payable-to name and mailing address from `app_settings`, and an admin records
+receipt via `POST /admin/membership/applications/{id}/record-payment`, which is what advances the
+payment half of the readiness check. If you'd rather not accept checks at all, drop the enum to a
+single value and the flow collapses to online-only with no other changes.
 
 **`membership_endorsements`**
 
@@ -383,6 +495,13 @@ endorsement and nominate a replacement. Declines are kept, not deleted, so admin
 
 There is deliberately no expiry column. If annual dues are introduced later, this table already has
 the right shape to gain `starts_on`/`ends_on` without restructuring.
+
+**Revocation cascades to listings.** Revoking a membership (or suspending the user) demotes the
+account to `viewer` **and archives every breeder listing they own** in the same transaction:
+`status = 'archived'`, `archived_at`, `archived_reason = 'membership_revoked'`. The listing leaves
+the public directory immediately but is not deleted, and ownership is preserved — a re-granted
+membership calls `restore_listings_for(user)`, which returns listings archived for that reason to
+`published`, leaving ones an admin archived by hand alone. Both directions write `audit_log` rows.
 
 **Rejections and refunds.** Rejecting an application does not automatically refund. The admin
 rejection endpoint takes `refund: true|false`; when true it issues a full refund through the payment
@@ -414,6 +533,8 @@ are ordinary SQL. Unpublished edits live in `draft_content`.
 | `draft_content` | `jsonb NULL` | Pending edits; `NULL` = no unpublished changes |
 | `draft_updated_at`, `draft_updated_by` | | |
 | `published_at`, `last_published_by` | | |
+| `archived_at` | `timestamptz NULL` | |
+| `archived_reason` | `text NULL` | `membership_revoked` \| `admin` \| `owner_request` — drives auto-restore (§5.4) |
 | `search_vector` | `tsvector` GENERATED | See §7 |
 | `created_at`, `updated_at`, `created_by_user_id` | | |
 
@@ -464,7 +585,10 @@ General dog sports/activities: keyword search only, no location.
 
 **`activities`** — `id`, `slug` (unique), `name`, `summary NULL`, `description NULL`,
 `hero_media_id NULL`, `status`, `published_at`, `sort_order int` (for a curated order),
-`search_vector`, audit columns.
+`search_vector`, audit columns, plus **optional** location: `city NULL`, `state_province NULL`,
+`state_code NULL`, `country_code NULL`. The columns and the `(country_code, state_code)` partial
+index match the events table so a location filter can be switched on later without a migration;
+`GET /activities` accepts `state`/`country` and simply matches nothing when the fields are unset.
 **`activity_images`**, **`activity_links`** — same shape as their event counterparts.
 
 > **Note on the repeated image/link tables.** A single polymorphic `attachments(owner_type,
@@ -808,8 +932,9 @@ the client only ever receives a redirect URL.
 5. Persist a `payments` row (`requires_payment`) and return the session URL.
 
 **Membership fee** — `POST /api/v1/membership/applications/{id}/checkout`: the same shape without
-cart, stock, or shipping. Amount comes from server config (`MEMBERSHIP_FEE_CENTS`), snapshotted onto
-the application. On success the application moves toward `ready_for_review`; it never
+cart, stock, or shipping. Amount comes from `app_settings['membership.fee_cents']` (§5.3),
+snapshotted onto the application at submission so a later fee change never rewrites a submitted
+application's amount. On success the application moves toward `ready_for_review`; it never
 auto-approves.
 
 ### 9.2 Fulfilment is webhook-driven
@@ -886,7 +1011,7 @@ All paths are prefixed `/api/v1`. **Auth** column: `–` public, `U` any authent
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| GET | `/membership/config` | – | Fee, currency, required sponsor count, question set |
+| GET | `/membership/config` | – | Fee, currency, required sponsor count, payment options, check instructions — read from `app_settings` |
 | POST | `/membership/applications` | U | Create a draft application |
 | GET | `/membership/applications/me` | U | The applicant's own application + endorsement states |
 | PATCH | `/membership/applications/{id}` | O | Edit while `draft` |
@@ -903,18 +1028,25 @@ All paths are prefixed `/api/v1`. **Auth** column: `–` public, `U` any authent
 | GET | `/admin/membership/applications/{id}` | A | Full detail incl. payment and endorsements |
 | POST | `/admin/membership/applications/{id}/approve` | A | Grants `member`, writes `memberships` |
 | POST | `/admin/membership/applications/{id}/reject` | A | `{reason, refund: bool}` |
+| POST | `/admin/membership/applications/{id}/record-payment` | A | Record a mailed check: `{reference, received_at}` |
+| POST | `/admin/users/{id}/membership/revoke` | A | Demotes to `viewer`, archives owned listings (§5.4) |
+| GET | `/admin/settings` | A | All editable settings with type, label and current value |
+| PATCH | `/admin/settings` | A | `{"membership.fee_cents": 5000}` — validated against `SETTING_DEFS` |
 
 Application state transitions:
 
 ```
-draft ──submit──▶ submitted ──(payment succeeded AND 2 endorsements accepted)──▶ ready_for_review
+draft ──submit──▶ submitted ──(fee settled AND 2 endorsements accepted)──▶ ready_for_review
   │                   │                                                                │
   └──withdraw──▶ withdrawn ◀──withdraw───┘                            approve ─────────┤──▶ approved
                                                                        reject ─────────┘──▶ rejected
 ```
 
-`submitted → ready_for_review` is evaluated by one service function called from both the payment
-webhook and the endorsement-accept endpoint, so the ordering of those two events does not matter.
+"Fee settled" means `payments.status = 'succeeded'` for an online payment, or
+`offline_payment_received_at IS NOT NULL` for a mailed check. `submitted → ready_for_review` is
+evaluated by one service function — `maybe_mark_ready(application)` — called from the payment
+webhook, the record-payment endpoint, and the endorsement-accept endpoint, so the order in which
+those events arrive does not matter.
 
 ### 10.3 Breeder directory
 
@@ -1007,7 +1139,7 @@ RQ over Redis. The job surface is small enough that Celery's extra machinery is 
 
 | Job | Trigger | Work |
 | --- | --- | --- |
-| `send_email` | Enqueued | Transactional email via provider API |
+| `send_email` | Enqueued | Transactional email via AWS SES (`boto3`) |
 | `generate_media_variants` | On `media/complete` | Resize to thumb/card/hero, write `media_variants` |
 | `release_expired_reservations` | Cron, every 5 min | Release holds, cancel stale `pending_payment` orders |
 | `cleanup_media` | Cron, nightly | Delete orphaned pending/unreferenced media |
@@ -1015,71 +1147,183 @@ RQ over Redis. The job surface is small enough that Celery's extra machinery is 
 | `retry_failed_webhooks` | Cron, every 15 min | Re-process `webhook_events` with `status='failed'` |
 
 Emails (Jinja templates, plain text + HTML): verification, password reset, endorsement request,
-endorsement responded, application submitted, application approved/rejected, order confirmation,
-shipping confirmation, refund issued, admin digest of applications awaiting review.
+endorsement responded, application submitted, check-payment instructions, application
+approved/rejected, order confirmation, shipping confirmation, refund issued, admin digest of
+applications awaiting review.
 
-Email sending is always enqueued, never inline — an SMTP timeout must not fail a checkout.
+Email sending is always enqueued, never inline — an SES timeout must not fail a checkout.
+
+**SES specifics.** `SendEmailV2` through `boto3`, not SMTP, so bounces and complaints come back as
+SNS notifications; a `POST /webhooks/ses` endpoint (SNS signature-verified) records them in an
+`email_suppressions` table (`email`, `type` (`bounce`|`complaint`), `reason`, `created_at`) and the
+send job skips suppressed addresses. Ignoring that feedback loop is the usual way a domain's
+sending reputation dies. A configuration set with event publishing is set at the identity level;
+production requires SES production access (out of the sandbox) and DKIM + SPF + a DMARC record on
+the sending domain, which is a DNS task worth starting early since propagation and AWS review both
+take days.
 
 ---
 
-## 12. Project layout
+## 12. Repository layout, models, and migrations
+
+### 12.1 Directories
 
 ```
-gpca-api/
-├── app/
-│   ├── __init__.py          # create_app() factory
-│   ├── config.py            # Pydantic Settings, env-driven
-│   ├── extensions.py        # db, migrate, limiter, redis, s3
-│   ├── models/              # SQLAlchemy: user, membership, listing, event,
-│   │                        #   activity, content, media, store, payment
-│   ├── schemas/             # Pydantic request/response models, same modules
-│   ├── api/v1/              # blueprints: auth, membership, breeders, events,
-│   │                        #   activities, pages, store, admin, media, webhooks
-│   ├── services/            # business logic; no Flask imports
-│   ├── security/            # jwt, password hashing, decorators, authz
-│   ├── integrations/        # stripe_client, s3_client, email_client
-│   ├── jobs/                # rq tasks
-│   ├── content/schemas.py   # PAGE_SCHEMAS registry
-│   └── errors.py            # AppError hierarchy + handlers
-├── migrations/              # Alembic
-├── tests/                   # pytest: unit (services), integration (API)
-├── docker/
-│   ├── Dockerfile
-│   ├── docker-compose.yml       # api, worker, db, redis, minio, nginx
-│   └── docker-compose.prod.yml
-└── pyproject.toml
+GPCA-V2/
+├── ui/                          # frontend (out of scope for this document)
+│
+├── api/                         # service layer — Flask, Pydantic, business rules
+│   ├── pyproject.toml           # depends on gpca-domain (path dependency)
+│   ├── app/
+│   │   ├── __init__.py          # create_app() factory
+│   │   ├── config.py            # pydantic-settings, env-driven, validated at boot
+│   │   ├── extensions.py        # session factory, limiter, redis, s3, ses clients
+│   │   ├── errors.py            # AppError hierarchy + problem+json handlers
+│   │   ├── routes/v1/           # blueprints: auth, membership, breeders, events,
+│   │   │                        #   activities, pages, store, media, admin, webhooks
+│   │   ├── schemas/             # Pydantic ONLY — request + response models per domain
+│   │   ├── services/            # business rules, transaction boundaries, state machines
+│   │   ├── security/            # jwt, argon2, decorators, authorization
+│   │   ├── integrations/        # stripe_client, s3_client, ses_client
+│   │   ├── jobs/                # rq tasks
+│   │   ├── content/schemas.py   # PAGE_SCHEMAS registry (§5.8)
+│   │   ├── settings_defs.py     # SETTING_DEFS registry (§5.3)
+│   │   └── cli.py               # flask seed / users create-admin
+│   └── tests/
+│       ├── unit/                # services with a fake repository
+│       └── integration/         # API against a real Postgres
+│
+├── domain/                      # db layer — SQLAlchemy + Alembic, no web framework
+│   ├── pyproject.toml           # depends on sqlalchemy, alembic, psycopg — nothing else
+│   ├── alembic.ini
+│   ├── migrations/
+│   │   ├── env.py               # imports gpca_domain.models for autogenerate metadata
+│   │   └── versions/
+│   └── gpca_domain/
+│       ├── base.py              # DeclarativeBase, naming convention, TimestampMixin
+│       ├── enums.py             # StrEnum + the PG ENUM type objects
+│       ├── types.py             # UUIDv7 pk, Money, CIText, TSVector helpers
+│       ├── session.py           # engine + sessionmaker construction (no Flask globals)
+│       ├── models/              # user, membership, breeder, event, activity,
+│       │                        #   content, media, store, payment, settings, audit
+│       └── repositories/        # the only place select()/insert() is written
+│
+├── infra/                       # no application code
+│   ├── docker/                  # Dockerfile.api, Dockerfile.ui, entrypoints
+│   ├── compose/                 # docker-compose.yml (dev) + .prod.yml
+│   ├── nginx/
+│   └── env/                     # .env.example per environment (never real secrets)
+│
+└── docs/
 ```
 
-`app/services/` never imports Flask. That keeps business rules callable from jobs, CLI commands and
-tests without a request context, and it is what makes the state machines in §10.2 testable in
-isolation.
+`api/` declares `gpca-domain` as a path dependency (`{path = "../domain", develop = true}`), so the
+dependency direction is enforced by packaging, not convention: `domain/` cannot import `api/`
+because it does not depend on it and never will.
 
-### 12.1 Migrations and seeds
+### 12.2 Strict SQLAlchemy models
 
-Alembic with `compare_type=True`. Native enum changes are written explicitly (`ALTER TYPE ... ADD
-VALUE`) because autogenerate does not handle them. Every migration must be reversible or state in a
-comment why it is not.
+`domain/gpca_domain/models/` holds the only ORM classes in the system. "Strict" means specific
+things:
 
-Flask CLI commands: `flask seed dev` (demo listings, events, products), `flask seed content` (upsert
-`content_blocks` from `PAGE_SCHEMAS`), `flask users create-admin`.
+```python
+class Base(DeclarativeBase):
+    metadata = MetaData(naming_convention={
+        "ix": "ix_%(table_name)s_%(column_0_N_name)s",
+        "uq": "uq_%(table_name)s_%(column_0_N_name)s",
+        "ck": "ck_%(table_name)s_%(constraint_name)s",
+        "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+        "pk": "pk_%(table_name)s",
+    })
+    type_annotation_map = {Decimal: Numeric(12, 2), dict: JSONB, datetime: TIMESTAMP(timezone=True)}
 
-### 12.2 Testing
 
-- `pytest` + `testcontainers[postgres]` (or a compose-provided database in CI) — no SQLite. Generated
-  columns, `citext`, partial indexes and `jsonb` behave differently enough that SQLite tests would
-  pass while production fails.
+class BreederListing(Base):
+    __tablename__ = "breeder_listings"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid7)
+    slug: Mapped[str | None] = mapped_column(CIText, unique=True)
+    owner_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    status: Mapped[PublicationStatus] = mapped_column(publication_status_enum)
+
+    owner: Mapped["User | None"] = relationship(lazy="raise", back_populates="breeder_listings")
+    images: Mapped[list["BreederListingImage"]] = relationship(
+        lazy="raise", order_by="BreederListingImage.sort_order", cascade="all, delete-orphan"
+    )
+```
+
+- **Every attribute is `Mapped[...]`-annotated.** `__allow_unmapped__` is never set, so an
+  un-annotated class attribute is an error at import time rather than a mystery at runtime.
+- **`lazy="raise"` on every relationship.** Accessing an unloaded relationship raises instead of
+  emitting a query. This is the single highest-value rule here: it makes N+1 queries and
+  detached-instance errors impossible to introduce accidentally, and it forces every access path to
+  declare what it needs via `selectinload()` in the repository.
+- **Naming conventions on `MetaData`.** Every index and constraint gets a deterministic name, which
+  is what lets Alembic autogenerate produce clean, reversible downgrades.
+- **No serialization methods.** No `to_dict()`, no `__json__`, no Pydantic config. A model that
+  knows how to serialize itself is a model the API layer will start depending on.
+- **No business logic.** Models hold columns, relationships, and constraints. `approve()` belongs in
+  a service; a model method that mutates related rows is a transaction boundary hiding in an object.
+- **`Session` is passed in.** No global session, no `db.session` proxy — repositories take
+  `session: Session` as their first argument, so tests and jobs control the transaction.
+- **`expire_on_commit=False`** on the sessionmaker, and services commit *before* the route converts
+  to a response model, so serialization never triggers a surprise refresh against a closed
+  transaction.
+
+### 12.3 Alembic migrations
+
+Alembic lives in `domain/` next to the models it tracks, and is the **only** way the schema
+changes — no `create_all()` anywhere outside a throwaway test fixture.
+
+- `env.py` imports `gpca_domain.models` so `target_metadata = Base.metadata` sees every table, and
+  reads the URL from `DATABASE_URL` rather than `alembic.ini`, so the same migrations run in dev,
+  CI and prod unchanged.
+- `context.configure(compare_type=True, compare_server_default=True, include_schemas=False)`.
+- **Autogenerate is a draft, not an answer.** Every generated revision is read and edited before
+  it is committed. Things autogenerate reliably gets wrong here: native `ENUM` changes, the
+  `GENERATED ALWAYS AS ... STORED` search vectors, partial and expression indexes, and `CHECK`
+  constraints — all of which this schema uses heavily.
+- **Enum changes are hand-written.** `ALTER TYPE ... ADD VALUE` cannot run inside a transaction
+  block on older servers and cannot be reversed, so a value addition is its own revision with a
+  comment explaining the irreversibility.
+- **Index creation on populated tables uses `CREATE INDEX CONCURRENTLY`** in a revision marked
+  `transactional_ddl = False`, so a deploy does not lock the directory table.
+- **Every revision has a real `downgrade()`**, or a comment stating why it cannot.
+- **Data migrations are separate revisions** from schema migrations, and use core `table()`/`column()`
+  constructs rather than importing the ORM models — a model imported into a migration silently
+  becomes a time bomb the next time that model changes.
+- **One head, always.** CI fails on multiple heads (`alembic heads --resolve-dependencies`) and on a
+  model/migration mismatch: a job runs `alembic upgrade head` against an empty database, then
+  `alembic check`, which fails if autogenerate would produce a non-empty diff. That check is what
+  keeps "someone edited a model and forgot the migration" from reaching main.
+- Migrations run as a one-shot container before the API rolls (§12.5), never from the app entrypoint.
+
+Seed data ships as Alembic revisions where it is structural (`content_blocks` from `PAGE_SCHEMAS`,
+`app_settings` from `SETTING_DEFS`) and as `flask seed dev` where it is only for local convenience.
+
+### 12.4 Testing
+
+- `pytest` + `testcontainers[postgres]` (or a compose-provided database in CI) — no SQLite.
+  Generated columns, `citext`, partial indexes, native enums and `jsonb` behave differently enough
+  that SQLite tests would pass while production fails.
+- The schema under test is built by running **Alembic**, not `create_all()`, so migrations are
+  exercised on every run.
 - Each test runs in a transaction rolled back at teardown.
-- `factory_boy` for fixtures; `responses`/`stripe-mock` for Stripe; `moto` for S3.
-- Coverage targets: the membership state machine, the publish transaction, stock concurrency
+- `factory_boy` for fixtures; `stripe-mock` for Stripe; `moto` for S3 and SES.
+- Layer-appropriate tests: services against fake repositories (fast, no database), repositories
+  against real Postgres, routes end-to-end through the app.
+- Coverage targets: the membership state machine (including offline payment and endorsement
+  ordering), the publish transaction, membership revocation archiving listings, stock concurrency
   (parallel checkouts on the last unit), and webhook idempotency (same event delivered three times).
 
-### 12.3 Deployment
+### 12.5 Deployment
 
-Multi-stage Dockerfile (build wheels → slim runtime, non-root user). Gunicorn with
-`--workers $(2*CPU+1) --timeout 30`. Migrations run as a one-shot container before the API rolls,
-not in the app entrypoint, so concurrent workers cannot race the schema. Config is entirely
-environment-driven and validated at boot by `pydantic-settings`; the process refuses to start with a
-missing secret rather than failing on the first request.
+Multi-stage Dockerfiles under `infra/docker/` (build wheels → slim runtime, non-root user).
+Gunicorn with `--workers $(2*CPU+1) --timeout 30`. `api` and `worker` share an image and differ only
+by entrypoint. Migrations run as a one-shot container before the API rolls, so concurrent workers
+cannot race the schema. Config is entirely environment-driven and validated at boot by
+`pydantic-settings`; the process refuses to start with a missing secret rather than failing on the
+first request.
 
 Backups: nightly `pg_dump` to object storage with a 30-day retention, plus bucket versioning on the
 media bucket. Restore is rehearsed before launch, not after the first incident.
@@ -1106,22 +1350,28 @@ media bucket. Restore is rehearsed before launch, not after the first incident.
 
 ## 14. Open questions
 
-1. **Membership fee amount and currency** — configured as `MEMBERSHIP_FEE_CENTS`, or a row in a
-   small `settings` table so admins can change it without a deploy?
-2. **Application questionnaire** — I've modeled it as versioned `jsonb` + a code-side question set.
-   Do you have the current paper/PDF application to model the fields against?
-3. **Shipping rates** — flat rate, weight-based tiers, or Stripe Checkout's shipping options?
-   `weight_grams` is in the schema either way. International shipping at all?
-4. **Sales tax** — Stripe Tax (automatic, per-jurisdiction) or a single home-state rate?
-5. **Data migration** — is there an export from the existing site (members, breeders, events) to
-   import, and do existing users need accounts created with a forced password reset?
-6. **Breeder listing ↔ member coupling** — if an admin revokes someone's membership, should their
-   published listing auto-archive, or stay live until an admin archives it?
-7. **Discount codes** — not modeled. Worth a `discounts` table in v1, or later?
-8. **Email provider** — Postmark, SES, Resend? Affects the `email_client` integration only.
-9. **Whether `activities` need location** — currently keyword-search only, per the feature list.
+Still unresolved, in rough order of how much they block implementation:
 
----
+1. **Shipping rates** — flat rate, weight-based tiers, or Stripe Checkout's own shipping options?
+   `weight_grams` is in the schema either way. International shipping at all? This is the only open
+   item that blocks finishing checkout.
+2. **Sales tax** — Stripe Tax (automatic, per-jurisdiction) or a single home-state rate? Affects the
+   totals math and the `orders` columns only.
+3. **Data migration** — is there an export from the existing site (members, breeders, events) to
+   import? If existing users need accounts, the plan is: create accounts with unusable password
+   hashes, then send a forced password-reset email at cutover.
+4. **Discount codes** — not modeled. Worth a `discounts` table in v1, or later? Adding it later is
+   a `discounts` table plus one nullable `orders.discount_id` — cheap to defer.
+5. **Check payments** — §5.4 assumes "payment options" on the paper form means online-vs-check.
+   Confirm; if it is online-only, the `payment_option` enum collapses to one value.
+6. **Membership fee amount** — the mechanism is settled (`app_settings`, admin-editable). What is
+   the current fee and currency for the seed row?
+7. **`site.contact_email` and check remittance details** — needed to seed `app_settings` and the
+   check-payment email template.
+
+Answered since the first draft: membership fee is an admin-editable DB row (§5.3); application
+fields are typed columns (§5.4); revoked memberships archive owned listings (§5.4); email is AWS
+SES (§11); activities carry optional location (§5.7).
 
 ## 15. Decision log
 
@@ -1137,3 +1387,10 @@ media bucket. Restore is rehearsed before launch, not after the first incident.
 | Page schemas in code | Admin-authored page types | Matches the requirement: fixed structure per page type, new types are a dev request |
 | Separate image/link tables per entity | One polymorphic attachments table | Real foreign keys and cascades; duplication absorbed by mixins |
 | RQ | Celery | Six jobs; RQ is a fraction of the operational surface |
+| `domain/` separate from `api/`, enforced by packaging | One `app/` package with a `models/` folder | Makes the ORM/wire-model split structural — `domain/` cannot import Flask or Pydantic because it does not depend on them |
+| Distinct SQLAlchemy and Pydantic model families | Generated schemas (`sqlalchemy-pydantic`, `SQLModel`) | A column rename must not silently change the public API; the duplication is the safety property, not an accident |
+| `lazy="raise"` on every relationship | Default lazy loading | Turns N+1 queries and detached-instance bugs into import-time-obvious errors; forces explicit eager loading in repositories |
+| Typed columns for the application form | `jsonb` answers blob | Fixed, short question set that admins filter and export on; attestations deserve `NOT NULL` booleans |
+| Admin-editable settings in `app_settings`, keys fixed in code | Environment variables | Fee changes without a deploy, but admins still cannot invent keys |
+| Revocation archives listings automatically | Leave listings live until an admin acts | A revoked member should not keep a public directory listing; `archived_reason` makes it reversible |
+| Alembic in `domain/`, `alembic check` in CI | Migrations beside the app; autogenerate trusted | Migrations version the same package as the models, and CI catches a model edited without a migration |
