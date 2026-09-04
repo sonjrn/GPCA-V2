@@ -5,7 +5,11 @@ target-version = "py312"
 line-length = 100
 src = ["api", "db"]
 
-exclude = [".git", ".venv", "venv", "__pycache__", "build", "dist", "ui"]
+# Markdown is excluded deliberately: `ruff format` reformats Python code blocks
+# embedded in .md files, which rewrites the hand-aligned snippets in
+# docs/technical-design.md on every run. Those snippets are illustrative and
+# reference types that do not exist yet, so formatting them is pure churn.
+exclude = [".git", ".venv", "venv", "__pycache__", "build", "dist", "ui", "*.md"]
 
 [lint]
 select = [
