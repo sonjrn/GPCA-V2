@@ -15,6 +15,9 @@ dependencies = [
     "SQLAlchemy>=2.0.30",
     "alembic>=1.13",
     "psycopg[binary]>=3.1",
+    # UUIDv7 generation. The standard library gains uuid.uuid7 in Python 3.14;
+    # this dependency goes away when the project moves to it.
+    "uuid6>=2024.7.10",
 ]
 
 [project.optional-dependencies]
@@ -22,3 +25,7 @@ dev = ["mypy>=1.10", "ruff>=0.5", "pytest>=8.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["gpca_db"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"

@@ -1,0 +1,54 @@
+"""Engine and session-factory construction.
+
+Both take their configuration as arguments. Nothing here reads an environment
+variable, and no engine is built at import time -- the API layer owns the
+lifecycle and passes the URL in (docs/technical-design.md 12.2). That is what
+lets tests, migrations and background workers each construct their own.
+"""
+
+from sqlalchemy import Engine, create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
+__all__ = ["build_engine", "build_session_factory"]
+
+
+def build_engine(
+    url: str,
+    *,
+    echo: bool = False,
+    pool_size: int = 5,
+    max_overflow: int = 5,
+    pool_recycle_seconds: int = 1800,
+    pool_pre_ping: bool = True,
+) -> Engine:
+    """Create an Engine for `url`.
+
+    `pool_pre_ping` costs one round trip per checkout and buys immunity to
+    connections killed underneath the pool -- by a database restart, a deploy,
+    or an idle timeout on a managed instance. Without it those surface as a
+    random failed request rather than a transparent reconnect.
+
+    `pool_recycle_seconds` retires connections before infrastructure between
+    the app and PostgreSQL decides to.
+    """
+    return create_engine(
+        url,
+        echo=echo,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_recycle=pool_recycle_seconds,
+        pool_pre_ping=pool_pre_ping,
+        future=True,
+    )
+
+
+def build_session_factory(engine: Engine) -> sessionmaker[Session]:
+    """Create the session factory bound to `engine`.
+
+    `expire_on_commit=False` matters for the response path: with the default,
+    committing expires every loaded attribute, so serializing a model after
+    commit would re-query -- or fail outright once the session is closed.
+    Keeping attributes alive is what lets a route commit and then build its
+    response model from the object it already has (12.3).
+    """
+    return sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
