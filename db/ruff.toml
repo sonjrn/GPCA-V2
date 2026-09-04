@@ -1,0 +1,14 @@
+# Inherits every rule from the root config, then adds the boundary that keeps
+# the persistence layer free of the web layer (see docs/technical-design.md §2.3).
+#
+# Ruff applies the nearest config to each file, so these bans apply to db/ only.
+
+extend = "../ruff.toml"
+
+[lint.flake8-tidy-imports.banned-api]
+"flask".msg = "db/ is the persistence layer and must not import the web framework. Move this to api/."
+"pydantic".msg = "Pydantic models belong in api/app/schemas. db/ defines SQLAlchemy models only."
+"pydantic_settings".msg = "Configuration is read in api/. db/ takes its connection URL as an argument."
+"stripe".msg = "Third-party integrations live in api/app/integrations."
+"boto3".msg = "Third-party integrations live in api/app/integrations."
+"app".msg = "db/ must never import from the API layer. The dependency runs api/ -> db/ only."
