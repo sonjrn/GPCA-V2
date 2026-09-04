@@ -52,7 +52,7 @@ These came out of scoping and drive most of the decisions below:
 
 | Layer | Choice | Notes |
 | --- | --- | --- |
-| Language | Python 3.12 | |
+| Language | Python 3.14 | `uuid.uuid7()` is in the standard library from this version |
 | Web framework | Flask 3 (app factory + blueprints) | |
 | Request/response models | Pydantic v2 | Validation at the edge, never trusted from the ORM inward |
 | ORM | SQLAlchemy 2.0 (`Mapped[]` declarative) | |
@@ -157,7 +157,7 @@ Rules that make this hold up in practice:
 
 ### 3.1 Identifiers
 
-- Primary keys are `UUID` (v7, generated in Python via `uuid6.uuid7()` for index locality).
+- Primary keys are `UUID` (v7, generated in Python via `uuid.uuid7()` for index locality).
   v7 keeps B-tree inserts sequential, avoiding the page-split behaviour of v4.
 - Public URLs use `slug` (`citext`, unique) for content entities: breeder listings, events,
   activities, products. Slugs are generated from the name and are stable once published; changing a

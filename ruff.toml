@@ -1,7 +1,7 @@
 # Root lint/format configuration, inherited by every package.
 # db/ruff.toml extends this file and adds the import-boundary rules.
 
-target-version = "py312"
+target-version = "py314"
 line-length = 100
 src = ["api", "db"]
 

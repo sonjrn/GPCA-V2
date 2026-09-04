@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "gpca-api"
 version = "0.1.0"
 description = "GPCA service layer: Flask routes, schemas, services and integrations."
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 
 dependencies = [
     "gpca-db",
