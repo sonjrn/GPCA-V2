@@ -66,9 +66,16 @@ class UserRole(StrEnum):
 
 
 class UserStatus(StrEnum):
+    """What the account is while it exists.
+
+    Removal is not a status: an account that has been deleted carries
+    `users.deleted_at`. Keeping the two axes apart means a suspended account is
+    still a live account, and a deleted one records *when* -- which is what a
+    retention or purge job needs to query.
+    """
+
     ACTIVE = "active"
     SUSPENDED = "suspended"
-    DELETED = "deleted"
 
 
 class ApplicationStatus(StrEnum):
@@ -91,15 +98,26 @@ class EndorsementStatus(StrEnum):
     PENDING = "pending"
     ACCEPTED = "accepted"
     DECLINED = "declined"
-    CANCELLED = "cancelled"
+    CANCELED = "canceled"
 
 
 class PublicationStatus(StrEnum):
-    """Shared by breeder listings, events, activities and products."""
+    """Whether content is live. Shared by listings, events, activities, products.
+
+    Archival is not a status: withdrawn content carries `archived_at`, and on
+    breeder listings an `archived_reason` that drives auto-restore when a
+    revoked membership is re-granted. Splitting the axes means a *draft* can be
+    archived too, which a three-value enum cannot express, and removes the
+    redundancy of `status = 'archived'` sitting beside an `archived_at` column
+    with nothing keeping them in agreement.
+
+    Public reads therefore filter on both: `status = 'published' AND
+    archived_at IS NULL`. That pairing lives in the repository loaders so no
+    route can forget half of it.
+    """
 
     DRAFT = "draft"
     PUBLISHED = "published"
-    ARCHIVED = "archived"
 
 
 class MediaStatus(StrEnum):
@@ -127,7 +145,7 @@ class OrderStatus(StrEnum):
     PENDING_PAYMENT = "pending_payment"
     PAID = "paid"
     FULFILLED = "fulfilled"
-    CANCELLED = "cancelled"
+    CANCELED = "canceled"
     REFUNDED = "refunded"
     PARTIALLY_REFUNDED = "partially_refunded"
 
