@@ -5,14 +5,13 @@ column, so a model writes `Mapped[UUIDPk]` rather than repeating the same
 `mapped_column(...)` arguments on every table.
 """
 
-import uuid
 from typing import Annotated
+from uuid import UUID, uuid7
 
 from sqlalchemy import CheckConstraint, Integer, String
 from sqlalchemy.dialects.postgresql import CITEXT, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import mapped_column
-from uuid6 import uuid7
 
 __all__ = [
     "CITEXT",
@@ -32,10 +31,10 @@ __all__ = [
 # shows up as index bloat and write amplification once tables are large.
 # Generated in Python rather than by the database so a new row's id is known
 # before flush, which is what lets services build related rows in one unit of
-# work. Python 3.14 adds uuid.uuid7 to the standard library; drop the uuid6
-# dependency and this alias's import when the project moves to it.
+# work. uuid7 is standard library as of Python 3.14, which is the floor this
+# project targets.
 UUIDPk = Annotated[
-    uuid.UUID,
+    UUID,
     mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid7),
 ]
 

@@ -1,6 +1,6 @@
 """Column aliases and constraint helpers."""
 
-import uuid
+from uuid import UUID
 
 import pytest
 from sqlalchemy.orm import DeclarativeBase, Mapped
@@ -36,7 +36,7 @@ def test_uuid_pk_alias_configures_the_column() -> None:
     assert id_column.default is not None
 
     generated = id_column.default.arg(None)  # type: ignore[union-attr]
-    assert isinstance(generated, uuid.UUID)
+    assert isinstance(generated, UUID)
     assert generated.version == 7
 
 

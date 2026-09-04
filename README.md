@@ -44,7 +44,7 @@ This is enforced two ways, so it cannot erode quietly:
 
 ## Getting started
 
-Requires Python 3.12+.
+Requires Python 3.14+.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -60,7 +60,7 @@ Or with [uv](https://docs.astral.sh/uv/), which resolves the sibling package
 from the working tree:
 
 ```bash
-uv venv --python 3.12 && source .venv/bin/activate
+uv venv --python 3.14 && source .venv/bin/activate
 uv pip install -e ./db -e "./api[dev]"
 ```
 

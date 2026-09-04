@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "gpca-db"
 version = "0.1.0"
 description = "GPCA persistence layer: SQLAlchemy models, queries and Alembic migrations."
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 
 # Deliberately minimal. This package must not grow a dependency on a web
 # framework, a validation library, or an SDK -- see docs/technical-design.md
@@ -15,9 +15,6 @@ dependencies = [
     "SQLAlchemy>=2.0.30",
     "alembic>=1.13",
     "psycopg[binary]>=3.1",
-    # UUIDv7 generation. The standard library gains uuid.uuid7 in Python 3.14;
-    # this dependency goes away when the project moves to it.
-    "uuid6>=2024.7.10",
 ]
 
 [project.optional-dependencies]
