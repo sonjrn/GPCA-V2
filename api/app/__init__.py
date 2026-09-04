@@ -11,6 +11,7 @@ from app.errors import register_error_handlers
 from app.extensions import init_database
 from app.logging import configure_logging, register_request_id
 from app.routes.health import bp as health_bp
+from app.validation import api_spec
 
 __version__ = "0.1.0"
 
@@ -41,6 +42,10 @@ def create_app(settings: Settings | None = None) -> Flask:
     # Unversioned: probes are for the runtime, not for API clients.
     app.register_blueprint(health_bp)
 
-    # Versioned blueprints register under API_PREFIX as they land (#14 onward).
+    # Versioned blueprints register under API_PREFIX as they land.
+
+    # Last, so the generated document sees every registered route. Serves the
+    # spec at /api/v1/openapi.json alongside its Swagger and ReDoc UIs.
+    api_spec.register(app)
 
     return app

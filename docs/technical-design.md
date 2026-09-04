@@ -74,11 +74,26 @@ Pydantic classes built with `model_config = ConfigDict(from_attributes=True)`. R
 models are never the same class — a `BreederListingUpdate` must not accept `id`, `owner_user_id`,
 or `status`.
 
-**OpenAPI.** Flask has no first-class Pydantic integration. Use a thin `@validate(body=..., query=..., response=...)`
-decorator that parses inputs, injects typed objects into the view, and registers the schemas into an
-`apispec` document served at `/api/v1/openapi.json`. This is ~150 lines and avoids adopting a
-framework (`flask-smorest` is marshmallow-based; `spectree` is a viable off-the-shelf alternative if
-we'd rather not own the decorator).
+**Validation and OpenAPI — decided.** Pydantic is the validation library, with **SpecTree** supplying
+the Flask glue: `@api_spec.validate(json=..., query=..., resp=...)` over ordinary blueprints, and an
+OpenAPI document generated from the same models, served at `/api/v1/openapi.json`.
+
+Marshmallow with `flask-smorest` was the serious alternative and is the more Flask-native ecosystem —
+same maintainers as Flask's extension family, OpenAPI and Swagger UI included. It lost on one point:
+`Schema().load()` returns a plain `dict`, so the typed request object that §2.3 depends on would have
+to be rebuilt with `@post_load` hooks, and mypy would have nothing to check request handling against.
+
+SpecTree was chosen over hand-rolling the decorator (~150 lines to own and keep in step with the
+OpenAPI spec) and over `flask-openapi3`, which replaces the Flask application class rather than
+layering onto normal routing.
+
+Two integrations are needed to make it fit this design, both in `api/app/validation.py`:
+
+- A `before` hook converts SpecTree's validation failure into `ValidationFailed`, so validation is
+  not the one error in the API that is not RFC 9457 problem+json (§3.4).
+- A naming strategy drops SpecTree's hash suffix (`ListingCreate.9a68e01`), which would otherwise
+  reach generated clients as a class name. The cost is that schema class names must be unique
+  project-wide.
 
 **Services layer.** Blueprints stay thin: parse → call service → serialize. Business rules
 (application state machine, publishing, stock decrements) live in `api/app/services/` so they are
