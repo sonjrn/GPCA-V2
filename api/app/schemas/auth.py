@@ -28,3 +28,11 @@ class AcceptedResponse(ResponseModel):
     """
 
     detail: str
+
+
+class VerifyEmailRequest(RequestModel):
+    token: str = Field(min_length=1, max_length=512)
+
+
+class MessageResponse(ResponseModel):
+    detail: str
