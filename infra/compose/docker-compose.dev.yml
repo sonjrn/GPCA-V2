@@ -1,0 +1,46 @@
+# Local development overlay. Run from the repository root:
+#   docker compose -f infra/compose/docker-compose.yml \
+#                  -f infra/compose/docker-compose.dev.yml up --build
+#
+# Everything here is what makes the stack reachable from, and editable on, the
+# host: published ports, the source bind mount, and the dev build stage. The
+# base file has none of it, so this only ever adds -- no Compose merge tags,
+# and nothing to forget to take away when another environment is added.
+
+name: gpca
+
+services:
+  db:
+    # Published so psql, Alembic and the test suite can reach it from the host.
+    # A deployment does not do this; the API talks to it over the compose
+    # network by service name.
+    ports:
+      - "5432:5432"
+
+  minio:
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  api:
+    build:
+      # Editable install plus the compiler, so the bind mount below reloads.
+      # A scalar, so this replaces the base's `runtime` outright -- unlike a
+      # list, which would merge.
+      target: dev
+    environment:
+      FLASK_ENV: development
+      # Where a browser fetches uploaded media from, so it has to be an
+      # address the host can resolve -- not the in-network minio hostname the
+      # API itself uses.
+      MEDIA_PUBLIC_BASE_URL: http://localhost:9000/${S3_BUCKET_MEDIA:-gpca-media}
+    volumes:
+      # Editable install in the dev stage, so a save on the host reloads.
+      - ../../api:/src/api
+      - ../../db:/src/db
+    ports:
+      - "8000:8000"
+
+  nginx:
+    ports:
+      - "8080:80"

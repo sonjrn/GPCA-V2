@@ -1318,7 +1318,7 @@ GPCA-V2/
 │
 ├── infra/                       # no application code
 │   ├── docker/                  # Dockerfile.api, Dockerfile.ui, entrypoints
-│   ├── compose/                 # docker-compose.yml (dev) + .prod.yml
+│   ├── compose/                 # docker-compose.yml (base) + .dev.yml overlay
 │   ├── nginx/
 │   └── env/                     # .env.example per environment (never real secrets)
 │
