@@ -13,6 +13,7 @@ from flask.testing import FlaskClient
 
 from app import create_app
 from app.config import Settings
+from app.validation import api_spec
 
 UNREACHABLE_DATABASE_URL = "postgresql+psycopg://user:pw@127.0.0.1:1/nonexistent"
 
@@ -27,6 +28,21 @@ def make_settings(**overrides: object) -> Settings:
     }
     values.update(overrides)
     return Settings(**values)  # type: ignore[arg-type]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_openapi_document() -> Iterator[None]:
+    """Clear SpecTree's memoized document between tests.
+
+    `api_spec` is a module-level singleton -- it has to be, since the decorator
+    is applied when a blueprint module is imported. It caches the generated
+    document on first access, so without this the first test app to request
+    /api/v1/openapi.json would freeze the document for every later one, and a
+    test asserting on its own routes would see someone else's.
+    """
+    api_spec.__dict__.pop("_spec", None)
+    yield
+    api_spec.__dict__.pop("_spec", None)
 
 
 @pytest.fixture

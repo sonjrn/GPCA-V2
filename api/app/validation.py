@@ -71,6 +71,13 @@ def _schema_name(model: type[BaseModel]) -> str:
     return model.__name__
 
 
+# A module-level singleton by necessity: the decorator is applied when a
+# blueprint module is imported, so the instance must exist at import time.
+#
+# It memoizes the generated document on first access, which is what you want
+# in production -- routes are all registered before the first request -- but
+# means a route added after that first request would be missing from the
+# document, and that tests must clear the cache between application instances.
 api_spec = SpecTree(
     "flask",
     title="GPCA API",

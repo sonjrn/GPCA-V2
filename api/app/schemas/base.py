@@ -6,6 +6,11 @@ schema in this package inherits one of them rather than BaseModel directly, so
 the rules hold by construction instead of by review.
 """
 
+from __future__ import annotations
+
+from collections.abc import Sequence
+from math import ceil
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -56,3 +61,44 @@ class ResponseModel(BaseModel):
     """
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class PageMeta(ResponseModel):
+    """Pagination counters, per design 3.3."""
+
+    page: int
+    per_page: int
+    total: int
+    total_pages: int
+
+
+class Page[ItemT](ResponseModel):
+    """The collection envelope: `{"data": [...], "meta": {...}}`.
+
+    Single resources are returned bare (3.3) -- wrapping them too would add a
+    layer every client has to unwrap for no benefit. Collections get the
+    envelope because the counters have nowhere else to live.
+    """
+
+    data: list[ItemT]
+    meta: PageMeta
+
+    @classmethod
+    def of(
+        cls,
+        items: Sequence[ItemT],
+        *,
+        page: int,
+        per_page: int,
+        total: int,
+    ) -> Page[ItemT]:
+        """Build a page, deriving total_pages so callers cannot get it wrong."""
+        return cls(
+            data=list(items),
+            meta=PageMeta(
+                page=page,
+                per_page=per_page,
+                total=total,
+                total_pages=ceil(total / per_page) if per_page > 0 else 0,
+            ),
+        )

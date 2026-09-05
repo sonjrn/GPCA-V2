@@ -62,3 +62,15 @@ def test_probes_are_not_under_the_api_prefix(client: FlaskClient) -> None:
     """They serve the runtime, so they must not move when /api/v2 arrives."""
     assert client.get("/health").status_code == 200
     assert client.get("/api/v1/health").status_code == 404
+
+
+def test_probe_shapes_are_documented(client: FlaskClient) -> None:
+    """The probes return declared models, not ad-hoc dicts.
+
+    Both statuses of the readiness probe are in the document, so an operator
+    reading the spec sees the degraded shape too.
+    """
+    document = json.loads(client.get("/api/v1/openapi.json").data)
+    assert set(document["paths"]["/health/ready"]["get"]["responses"]) >= {"200", "503"}
+    assert "ReadinessStatus" in document["components"]["schemas"]
+    assert "HealthStatus" in document["components"]["schemas"]

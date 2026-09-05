@@ -197,6 +197,13 @@ Single resources return the object directly. Collections return:
 }
 ```
 
+Both shapes are built by helpers in `api/app/responses.py`, the success-side
+counterpart to the error handlers in §3.4: `ok()`, `created()` (which sets `Location`),
+`no_content()` and `respond()` for an explicit status. They take a Pydantic response model
+rather than a dict, so a route cannot invent a payload that never reaches the OpenAPI
+document. The envelope is the generic `Page[T]`, whose `Page.of()` derives `total_pages`
+rather than accepting it, so the count can never disagree with the data.
+
 - Query params: `page` (1-based), `per_page` (default 24, max 100), `sort` (`-created_at`).
 - Offset pagination is fine at this data scale (hundreds of listings, not millions).
 
