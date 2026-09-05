@@ -25,9 +25,14 @@ from spectree import SpecTree
 
 from app.errors import ValidationFailed
 
-# Where the document and its UIs are served. Matches design 3.5: the spec
-# lands at /api/v1/openapi.json.
-SPEC_PATH = "api/v1"
+# SpecTree skips every route beginning with its own `path`, treating that
+# prefix as its documentation namespace. Setting this to "api/v1" therefore
+# excluded every versioned endpoint from the document -- the bug that hid until
+# the first one existed. The UIs live under /docs instead, and the spec is
+# additionally served at the documented /api/v1/openapi.json by an alias in
+# create_app whose endpoint name starts with "openapi", which is how SpecTree
+# knows to leave it out of its own output.
+SPEC_PATH = "docs"
 
 
 def _raise_as_problem_json(
