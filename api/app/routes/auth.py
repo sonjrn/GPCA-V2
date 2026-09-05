@@ -8,10 +8,12 @@ from app.extensions import session_scope
 from app.responses import no_content, ok, respond
 from app.schemas.auth import (
     AcceptedResponse,
+    ForgotPasswordRequest,
     LoginRequest,
     MessageResponse,
     RefreshRequest,
     RegisterRequest,
+    ResetPasswordRequest,
     TokenPairResponse,
     VerifyEmailRequest,
 )
@@ -178,3 +180,40 @@ def logout_all() -> Response:
         auth_service.revoke_all_sessions(session, user=attached)
 
     return no_content()
+
+
+@bp.post("/password/forgot")
+@api_spec.validate(
+    json=ForgotPasswordRequest,
+    resp=SpecResponse(HTTP_202=AcceptedResponse),
+    tags=["auth"],
+)
+def forgot_password() -> Response:
+    payload: ForgotPasswordRequest = request.context.json  # type: ignore[attr-defined]
+
+    with session_scope() as session:
+        auth_service.request_password_reset(session, email=str(payload.email))
+
+    auth_service.flush_pending_emails()
+    return respond(AcceptedResponse(detail=messages.RESET_REQUESTED), 202)
+
+
+@bp.post("/password/reset")
+@api_spec.validate(
+    json=ResetPasswordRequest,
+    resp=SpecResponse(HTTP_200=MessageResponse, HTTP_400=MessageResponse),
+    tags=["auth"],
+)
+def reset_password() -> Response:
+    payload: ResetPasswordRequest = request.context.json  # type: ignore[attr-defined]
+
+    with session_scope() as session:
+        redeemed = auth_service.reset_password(
+            session, token=payload.token, new_password=payload.new_password
+        )
+
+    auth_service.flush_pending_emails()
+
+    if not redeemed:
+        return respond(MessageResponse(detail=messages.RESET_FAILED), 400)
+    return ok(MessageResponse(detail=messages.RESET_DONE))

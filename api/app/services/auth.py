@@ -384,3 +384,56 @@ def revoke_all_sessions(session: Session, *, user: User) -> None:
     """
     refresh_token_repo.revoke_all_for_user(session, user_id=user.id)
     user.token_version += 1
+
+
+def request_password_reset(session: Session, *, email: str) -> None:
+    """Mint a reset link, or pretend to.
+
+    Like `register`, this returns nothing a caller could branch on. The miss
+    path still generates and hashes a token so the CPU work matches; what it
+    cannot match is the INSERT, so the two paths differ by roughly one small
+    write. That is well inside the noise of a network round trip, and the
+    alternative -- an argon2 call on the miss path only -- would make the
+    unknown address measurably *slower*, which leaks just as much.
+    """
+    user = find_by_email(session, email)
+
+    if user is None:
+        secrets.token_urlsafe(SINGLE_USE_TOKEN_BYTES)
+        logger.info("password reset requested for an unknown address")
+        return
+
+    token = issue_single_use_token(
+        session, user=user, purpose=AuthTokenPurpose.PASSWORD_RESET, ttl=PASSWORD_RESET_TTL
+    )
+    _deferred_email(
+        to=user.email,
+        template="password_reset",
+        context={"first_name": user.first_name, "token": token},
+    )
+
+
+def reset_password(session: Session, *, token: str, new_password: str) -> bool:
+    """Set a new password from a reset token. True when it was redeemed.
+
+    Revoking every session is the point of the flow, not a nicety. Someone
+    resetting their password usually believes their account is compromised;
+    leaving the attacker's refresh token alive makes the reset theatre. The
+    `token_version` bump inside `revoke_all_sessions` kills any outstanding
+    access token too, rather than letting it run out its 15 minutes.
+    """
+    user = consume_single_use_token(session, token=token, purpose=AuthTokenPurpose.PASSWORD_RESET)
+    if user is None:
+        return False
+
+    user.password_hash = hash_password(get_hasher(), new_password)
+    revoke_all_sessions(session, user=user)
+
+    # Sent so an unexpected reset is visible to the real owner, who is the
+    # only person able to tell that it was not them.
+    _deferred_email(
+        to=user.email,
+        template="password_changed",
+        context={"first_name": user.first_name},
+    )
+    return True
