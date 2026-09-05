@@ -42,6 +42,9 @@ known-first-party = ["app", "gpca_db"]
 # HTTP status they map to, matching docs/technical-design.md 3.4 and reading
 # better where they are raised: `raise NotFound("breeder listing", slug)`.
 "api/app/errors.py" = ["N818"]
+# Same reasoning: TokenExpired/TokenInvalid read better at the raise site than
+# TokenExpiredError, and they sit under a TokenError base that does carry it.
+"api/app/security/tokens.py" = ["N818"]
 
 [format]
 docstring-code-format = true

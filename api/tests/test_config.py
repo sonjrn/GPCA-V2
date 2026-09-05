@@ -10,7 +10,7 @@ REQUIRED = ("SECRET_KEY", "DATABASE_URL", "JWT_SECRET")
 
 # Clears MIN_SECRET_LENGTH. Short values are rejected, which is the point of
 # test_a_placeholder_secret_is_rejected below.
-VALID_SECRET = "long-enough-to-be-accepted"
+VALID_SECRET = "long-enough-to-be-accepted-under-rfc-7518"
 VALID_DB_URL = "postgresql+psycopg://u@localhost/db"
 
 
@@ -58,15 +58,15 @@ def test_invalid_value_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_secrets_are_not_exposed_by_repr() -> None:
     """A settings object reaching a log or a traceback must not leak keys."""
     settings = Settings(
-        secret_key="super-secret-value-here",
+        secret_key="super-secret-value-here-padded-out-ok",
         database_url=VALID_DB_URL,
-        jwt_secret="also-secret-value-here",
+        jwt_secret="also-secret-value-here-padded-out-okay",
     )
     rendered = repr(settings) + str(settings.secret_key) + str(settings.jwt_secret)
-    assert "super-secret-value-here" not in rendered
-    assert "also-secret-value-here" not in rendered
+    assert "super-secret-value-here-padded-out-ok" not in rendered
+    assert "also-secret-value-here-padded-out-okay" not in rendered
     # The real value is still reachable where it is actually needed.
-    assert settings.secret_key.get_secret_value() == "super-secret-value-here"
+    assert settings.secret_key.get_secret_value() == "super-secret-value-here-padded-out-ok"
 
 
 def test_optional_integration_settings_default_to_none() -> None:

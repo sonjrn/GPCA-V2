@@ -23,7 +23,12 @@ class User(TimestampMixin, Base):
     # citext, so a lookup matches however the address was typed without every
     # query remembering to lower() both sides.
     email: Mapped[CaseInsensitiveEmail]
-    password_hash: Mapped[str] = mapped_column(Text)
+
+    # Nullable because a federated account (sign in with Google) has no
+    # password. The rule "an account must have at least one way to sign in"
+    # cannot be a CHECK -- PostgreSQL cannot reference another table from one
+    # -- so it is enforced in the service layer.
+    password_hash: Mapped[str | None] = mapped_column(Text)
 
     first_name: Mapped[str] = mapped_column(String(100))
     last_name: Mapped[str] = mapped_column(String(100))
@@ -63,7 +68,9 @@ class User(TimestampMixin, Base):
 
     __table_args__ = (
         # Partial, so a deleted account stops reserving its address and the
-        # person can register again. A plain UNIQUE would block that forever.
+        # person can register again. A plain UNIQUE would block that forever --
+        # and could not carry the WHERE clause at all, which is why this is a
+        # unique index rather than a UniqueConstraint.
         Index(
             "uq_users_email",
             "email",

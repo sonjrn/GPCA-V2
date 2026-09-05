@@ -18,6 +18,7 @@ from sqlalchemy.dialects.postgresql import ENUM
 
 __all__ = [
     "ApplicationStatus",
+    "AuthTokenPurpose",
     "CartStatus",
     "ContentBlockType",
     "EndorsementStatus",
@@ -29,6 +30,7 @@ __all__ = [
     "UserRole",
     "UserStatus",
     "application_status_enum",
+    "auth_token_purpose_enum",
     "cart_status_enum",
     "content_block_type_enum",
     "endorsement_status_enum",
@@ -92,6 +94,17 @@ class ApplicationStatus(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
     WITHDRAWN = "withdrawn"
+
+
+class AuthTokenPurpose(StrEnum):
+    """What a single-use `auth_tokens` row is for.
+
+    Checked explicitly wherever a token is consumed: a verification token must
+    not be usable to reset a password, and vice versa.
+    """
+
+    EMAIL_VERIFY = "email_verify"
+    PASSWORD_RESET = "password_reset"
 
 
 class EndorsementStatus(StrEnum):
@@ -167,6 +180,7 @@ class ContentBlockType(StrEnum):
 user_role_enum = _pg_enum(UserRole, "user_role")
 user_status_enum = _pg_enum(UserStatus, "user_status")
 application_status_enum = _pg_enum(ApplicationStatus, "application_status")
+auth_token_purpose_enum = _pg_enum(AuthTokenPurpose, "auth_token_purpose")
 endorsement_status_enum = _pg_enum(EndorsementStatus, "endorsement_status")
 publication_status_enum = _pg_enum(PublicationStatus, "publication_status")
 media_status_enum = _pg_enum(MediaStatus, "media_status")
