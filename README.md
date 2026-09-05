@@ -83,7 +83,8 @@ missing value fails startup rather than the first request that needs it.
 
 ```bash
 cp infra/env/.env.example .env      # optional: the dev stack has defaults
-docker compose -f infra/compose/docker-compose.yml up --build
+docker compose -f infra/compose/docker-compose.yml \
+               -f infra/compose/docker-compose.dev.yml up --build
 ```
 
 That brings up PostgreSQL, MinIO, the API and nginx, running migrations once
@@ -100,21 +101,26 @@ The API runs from an editable install with the source bind-mounted, so a save
 on the host reloads the process.
 
 ```bash
-docker compose -f infra/compose/docker-compose.yml down       # keeps data
-docker compose -f infra/compose/docker-compose.yml down -v    # discards it
-```
-
-### Production
-
-```bash
 docker compose -f infra/compose/docker-compose.yml \
-               -f infra/compose/docker-compose.prod.yml up -d
+               -f infra/compose/docker-compose.dev.yml down       # keeps data
+docker compose -f infra/compose/docker-compose.yml \
+               -f infra/compose/docker-compose.dev.yml down -v    # discards it
 ```
 
-The override switches the API to the non-editable `runtime` image, removes the
-source mount, unpublishes every port except nginx's, and requires each secret
-from the environment with no default — a missing one fails the deploy rather
-than starting a half-configured process.
+### Why two files
+
+`docker-compose.yml` is the composition root: images, wiring, health checks,
+and nothing that faces the host. `docker-compose.dev.yml` adds the published
+ports, the source bind mount, and the `dev` build stage.
+
+Overlays only ever add. Compose *merges* sequences across `-f` files, so an
+overlay cannot remove an inherited list — `ports: []` appends nothing and
+leaves the base's published port in place. Undoing one needs Compose's
+`!reset` tag, and a single forgotten `!reset` on a future service silently
+publishes it. A base with nothing host-facing has nothing to undo.
+
+There is no production overlay yet. When there is one, it adds its own ports
+and secrets alongside this file rather than unpicking it.
 
 ### Housekeeping
 

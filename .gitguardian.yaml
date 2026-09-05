@@ -11,9 +11,9 @@ secret:
   ignored_paths:
     # Every secret-shaped value in the template is empty.
     - 'infra/env/.env.example'
-    # Throwaway credentials for the local stack. The production overlay
-    # (docker-compose.prod.yml) has no defaults and is intentionally NOT
-    # ignored, so a real secret committed there is still caught.
+    # Throwaway credentials for the local stack. Only this file is ignored:
+    # any future environment overlay is intentionally NOT listed, so a real
+    # secret committed to one is still caught.
     - 'infra/compose/docker-compose.yml'
     # Fixture values, never used against anything real. test_errors.py holds a
     # deliberately credential-shaped string -- it is the payload proving a 500
