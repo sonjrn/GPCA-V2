@@ -302,7 +302,13 @@ exists, to avoid account enumeration.
 
 ## 5. Data model
 
-### 5.1 Entity relationships
+### 5.1 Entity relationships — target design, not the built schema
+
+> **This diagram is the intended schema.** Most of it is not implemented yet.
+> For what the migrations have actually built, see
+> [`docs/schema.dbml`](schema.dbml) — generated from the models, verified by
+> CI, and pasteable into [dbdiagram.io](https://dbdiagram.io).
+
 
 ```mermaid
 erDiagram
