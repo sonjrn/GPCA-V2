@@ -71,8 +71,7 @@ def issue_single_use_token(
     the previous token is consumed rather than left working -- otherwise every
     "resend" click leaves another valid link in circulation.
     """
-    now = datetime.now(UTC)
-    auth_token_repo.consume_outstanding(session, user_id=user.id, purpose=purpose, now=now)
+    auth_token_repo.consume_outstanding(session, user_id=user.id, purpose=purpose)
 
     plaintext = secrets.token_urlsafe(SINGLE_USE_TOKEN_BYTES)
     auth_token_repo.add(
@@ -81,7 +80,7 @@ def issue_single_use_token(
             user_id=user.id,
             purpose=purpose,
             token_hash=hash_refresh_token(plaintext),
-            expires_at=now + ttl,
+            expires_at=datetime.now(UTC) + ttl,
         ),
     )
     return plaintext
@@ -325,9 +324,7 @@ def rotate_refresh_token(
         raise RefreshRejected
 
     if row.revoked_at is not None:
-        revoked = refresh_token_repo.revoke_family(
-            session, family_id=row.family_id, now=datetime.now(UTC)
-        )
+        revoked = refresh_token_repo.revoke_family(session, family_id=row.family_id)
         logger.warning(
             "refresh token reuse detected; revoking family",
             extra={
@@ -385,5 +382,5 @@ def revoke_all_sessions(session: Session, *, user: User) -> None:
     alone leaves any already-issued access token working for up to its full
     lifetime, so "log me out everywhere" would not actually do that.
     """
-    refresh_token_repo.revoke_all_for_user(session, user_id=user.id, now=datetime.now(UTC))
+    refresh_token_repo.revoke_all_for_user(session, user_id=user.id)
     user.token_version += 1

@@ -6,7 +6,7 @@ security design rather than plumbing. Whether a lookup miss is an attack or an
 expiry is a service decision; this module only fetches and marks rows.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -53,13 +53,21 @@ def get_by_hash(session: Session, token_hash: bytes) -> RefreshToken | None:
     ).one_or_none()
 
 
-def revoke_family(session: Session, *, family_id: UUID, now: datetime) -> int:
+def revoke_family(session: Session, *, family_id: UUID) -> int:
     """Revoke every live token in one lineage. Returns how many.
 
     A whole family rather than one row: a replayed token means the chain is
     compromised, and leaving its newest descendant valid would leave whoever
     replayed it holding a working session.
+
+    The timestamp is read here rather than taken as a parameter. `revoked_at`
+    is `timestamptz`, and a naive datetime handed to it is not an error:
+    PostgreSQL reads it in the session's TimeZone, so a caller that forgets a
+    tzinfo silently stamps the revocation hours away from when it happened.
+    A parameter makes that spelling available; reading the clock here does
+    not.
     """
+    now = datetime.now(UTC)
     rows = session.scalars(
         select(RefreshToken).where(
             RefreshToken.family_id == family_id, RefreshToken.revoked_at.is_(None)
@@ -70,13 +78,16 @@ def revoke_family(session: Session, *, family_id: UUID, now: datetime) -> int:
     return len(rows)
 
 
-def revoke_all_for_user(session: Session, *, user_id: UUID, now: datetime) -> int:
+def revoke_all_for_user(session: Session, *, user_id: UUID) -> int:
     """Revoke every live token a user holds, across all families. Returns how many.
 
     The refresh half of "log me out everywhere". Bumping `token_version` is the
     other half and belongs to the caller, because it is a fact about the user
     rather than about these rows.
+
+    Reads its own timestamp, for the reason spelled out in `revoke_family`.
     """
+    now = datetime.now(UTC)
     rows = session.scalars(
         select(RefreshToken).where(
             RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None)

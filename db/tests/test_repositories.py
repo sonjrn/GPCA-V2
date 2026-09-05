@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from gpca_db.enums import AuthTokenPurpose, UserRole, UserStatus
@@ -158,15 +159,17 @@ def test_consume_outstanding_marks_live_tokens(session: Session) -> None:
     auth_token_repo.add(session, _token(user, AuthTokenPurpose.EMAIL_VERIFY, b"c" * 32))
     session.flush()
 
-    now = datetime.now(UTC)
+    before = datetime.now(UTC)
     consumed = auth_token_repo.consume_outstanding(
-        session, user_id=user.id, purpose=AuthTokenPurpose.EMAIL_VERIFY, now=now
+        session, user_id=user.id, purpose=AuthTokenPurpose.EMAIL_VERIFY
     )
+    after = datetime.now(UTC)
 
     assert consumed == 1
     row = auth_token_repo.get_by_hash(session, b"c" * 32)
     assert row is not None
-    assert row.consumed_at == now
+    assert row.consumed_at is not None
+    assert before <= row.consumed_at <= after
 
 
 def test_consume_outstanding_leaves_other_purposes_alone(session: Session) -> None:
@@ -177,10 +180,7 @@ def test_consume_outstanding_leaves_other_purposes_alone(session: Session) -> No
     session.flush()
 
     auth_token_repo.consume_outstanding(
-        session,
-        user_id=user.id,
-        purpose=AuthTokenPurpose.EMAIL_VERIFY,
-        now=datetime.now(UTC),
+        session, user_id=user.id, purpose=AuthTokenPurpose.EMAIL_VERIFY
     )
 
     reset = auth_token_repo.get_by_hash(session, b"e" * 32)
@@ -196,10 +196,7 @@ def test_consume_outstanding_is_what_makes_reissuing_legal(session: Session) -> 
     session.flush()
 
     auth_token_repo.consume_outstanding(
-        session,
-        user_id=user.id,
-        purpose=AuthTokenPurpose.EMAIL_VERIFY,
-        now=datetime.now(UTC),
+        session, user_id=user.id, purpose=AuthTokenPurpose.EMAIL_VERIFY
     )
     auth_token_repo.add(session, _token(user, AuthTokenPurpose.EMAIL_VERIFY, b"g" * 32))
     session.flush()
@@ -211,10 +208,7 @@ def test_consume_outstanding_on_nothing_is_zero(session: Session) -> None:
     user = user_repo.add(session, _user())
     assert (
         auth_token_repo.consume_outstanding(
-            session,
-            user_id=user.id,
-            purpose=AuthTokenPurpose.EMAIL_VERIFY,
-            now=datetime.now(UTC),
+            session, user_id=user.id, purpose=AuthTokenPurpose.EMAIL_VERIFY
         )
         == 0
     )
@@ -274,13 +268,15 @@ def test_revoke_family_takes_the_whole_lineage(session: Session) -> None:
     refresh_token_repo.add(session, _refresh(user, b"2" * 32, family_id=first.family_id))
     session.flush()
 
-    now = datetime.now(UTC)
-    assert refresh_token_repo.revoke_family(session, family_id=first.family_id, now=now) == 2
+    before = datetime.now(UTC)
+    assert refresh_token_repo.revoke_family(session, family_id=first.family_id) == 2
+    after = datetime.now(UTC)
 
     for digest in (b"1" * 32, b"2" * 32):
         row = refresh_token_repo.get_by_hash(session, digest)
         assert row is not None
-        assert row.revoked_at == now
+        assert row.revoked_at is not None
+        assert before <= row.revoked_at <= after
 
 
 def test_revoke_family_leaves_other_families_alone(session: Session) -> None:
@@ -291,9 +287,7 @@ def test_revoke_family_leaves_other_families_alone(session: Session) -> None:
     refresh_token_repo.add(session, _refresh(user, b"4" * 32))
     session.flush()
 
-    refresh_token_repo.revoke_family(
-        session, family_id=compromised.family_id, now=datetime.now(UTC)
-    )
+    refresh_token_repo.revoke_family(session, family_id=compromised.family_id)
 
     untouched = refresh_token_repo.get_by_hash(session, b"4" * 32)
     assert untouched is not None
@@ -305,10 +299,7 @@ def test_revoke_family_skips_already_revoked_rows(session: Session) -> None:
     row = refresh_token_repo.add(session, _refresh(user, b"5" * 32, revoked_at=datetime.now(UTC)))
     session.flush()
 
-    assert (
-        refresh_token_repo.revoke_family(session, family_id=row.family_id, now=datetime.now(UTC))
-        == 0
-    )
+    assert refresh_token_repo.revoke_family(session, family_id=row.family_id) == 0
 
 
 def test_revoke_all_for_user_crosses_families(session: Session) -> None:
@@ -317,9 +308,7 @@ def test_revoke_all_for_user_crosses_families(session: Session) -> None:
     refresh_token_repo.add(session, _refresh(user, b"7" * 32))
     session.flush()
 
-    assert (
-        refresh_token_repo.revoke_all_for_user(session, user_id=user.id, now=datetime.now(UTC)) == 2
-    )
+    assert refresh_token_repo.revoke_all_for_user(session, user_id=user.id) == 2
 
 
 def test_revoke_all_for_user_leaves_other_users_alone(session: Session) -> None:
@@ -329,8 +318,35 @@ def test_revoke_all_for_user_leaves_other_users_alone(session: Session) -> None:
     refresh_token_repo.add(session, _refresh(other, b"9" * 32))
     session.flush()
 
-    refresh_token_repo.revoke_all_for_user(session, user_id=user.id, now=datetime.now(UTC))
+    refresh_token_repo.revoke_all_for_user(session, user_id=user.id)
 
     survivor = refresh_token_repo.get_by_hash(session, b"9" * 32)
     assert survivor is not None
     assert survivor.revoked_at is None
+
+
+def test_revocation_stamps_true_utc_under_a_non_utc_session(session: Session) -> None:
+    """A guard on reading the clock inside the repository instead of taking it.
+
+    A naive datetime is legal input for a `timestamptz` column: PostgreSQL
+    interprets it in the connection's TimeZone rather than rejecting it, so a
+    caller that supplied one would record the revocation hours from when it
+    happened, with no error to notice. Pinning the connection to a zone that
+    is not UTC is what makes that failure mode observable at all -- under the
+    default UTC container it would pass either way.
+    """
+    user = user_repo.add(session, _user())
+    row = refresh_token_repo.add(session, _refresh(user, b"t" * 32))
+    session.execute(text("SET LOCAL TIME ZONE 'America/New_York'"))
+
+    before = datetime.now(UTC)
+    refresh_token_repo.revoke_family(session, family_id=row.family_id)
+    session.flush()
+    after = datetime.now(UTC)
+
+    session.expire_all()
+    stored = refresh_token_repo.get_by_hash(session, b"t" * 32)
+    assert stored is not None
+    assert stored.revoked_at is not None
+    assert stored.revoked_at.tzinfo is not None
+    assert before <= stored.revoked_at <= after
