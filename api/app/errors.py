@@ -117,6 +117,16 @@ class AuthenticationFailed(Exception):
     """
 
 
+class RefreshRejected(Exception):
+    """A refresh token that cannot be exchanged, for any reason.
+
+    Unknown, expired and replayed all raise this one type. The reuse case
+    additionally revokes the token's whole family before raising -- a side
+    effect, not a different signal, because telling the two apart is exactly
+    what the caller must not be able to do.
+    """
+
+
 def problem_response(
     *,
     status: int,

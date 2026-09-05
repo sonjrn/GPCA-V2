@@ -5,7 +5,7 @@ share the table and are told apart by `purpose`, which is why every lookup
 here takes one -- see consume_outstanding and get_by_hash.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -29,9 +29,7 @@ def get_by_hash(session: Session, token_hash: bytes) -> AuthToken | None:
     ).one_or_none()
 
 
-def consume_outstanding(
-    session: Session, *, user_id: UUID, purpose: AuthTokenPurpose, now: datetime
-) -> int:
+def consume_outstanding(session: Session, *, user_id: UUID, purpose: AuthTokenPurpose) -> int:
     """Mark every live token for this (user, purpose) consumed. Returns how many.
 
     Called before minting a replacement, because the partial unique index
@@ -39,8 +37,11 @@ def consume_outstanding(
     link working would mean every "resend" click adds another valid one to
     someone's inbox.
 
-    `now` is passed in rather than read here so one unit of work stamps every
-    row it touches with the same instant.
+    The timestamp is read here rather than taken as a parameter. `consumed_at`
+    is `timestamptz`, and a naive datetime handed to it is not an error:
+    PostgreSQL reads it in the session's TimeZone, so a caller that forgets a
+    tzinfo silently stamps the row hours away from when it was consumed. A
+    parameter makes that spelling available; reading the clock here does not.
 
     The flush at the end is the one place this package still flushes by hand,
     and it is insurance rather than a fix. SQLAlchemy emits UPDATEs before
@@ -56,6 +57,7 @@ def consume_outstanding(
             AuthToken.consumed_at.is_(None),
         )
     ).all()
+    now = datetime.now(UTC)
     for row in rows:
         row.consumed_at = now
     session.flush()

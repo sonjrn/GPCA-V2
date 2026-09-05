@@ -6,11 +6,15 @@ security design rather than plumbing. Whether a lookup miss is an attack or an
 expiry is a service decision; this module only fetches and marks rows.
 """
 
+from datetime import UTC, datetime
+from uuid import UUID
+
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from gpca_db.models import RefreshToken
 
-__all__ = ["add"]
+__all__ = ["add", "get_by_hash", "revoke_all_for_user", "revoke_family"]
 
 
 def add(session: Session, token: RefreshToken) -> RefreshToken:
@@ -35,3 +39,60 @@ def add(session: Session, token: RefreshToken) -> RefreshToken:
     session.add(token)
     session.flush()
     return token
+
+
+def get_by_hash(session: Session, token_hash: bytes) -> RefreshToken | None:
+    """By digest, revoked or not.
+
+    Deliberately unfiltered on `revoked_at`: finding an already-revoked row is
+    how reuse is detected, so filtering it out here would quietly delete the
+    feature this table exists for.
+    """
+    return session.scalars(
+        select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+    ).one_or_none()
+
+
+def revoke_family(session: Session, *, family_id: UUID) -> int:
+    """Revoke every live token in one lineage. Returns how many.
+
+    A whole family rather than one row: a replayed token means the chain is
+    compromised, and leaving its newest descendant valid would leave whoever
+    replayed it holding a working session.
+
+    The timestamp is read here rather than taken as a parameter. `revoked_at`
+    is `timestamptz`, and a naive datetime handed to it is not an error:
+    PostgreSQL reads it in the session's TimeZone, so a caller that forgets a
+    tzinfo silently stamps the revocation hours away from when it happened.
+    A parameter makes that spelling available; reading the clock here does
+    not.
+    """
+    now = datetime.now(UTC)
+    rows = session.scalars(
+        select(RefreshToken).where(
+            RefreshToken.family_id == family_id, RefreshToken.revoked_at.is_(None)
+        )
+    ).all()
+    for row in rows:
+        row.revoked_at = now
+    return len(rows)
+
+
+def revoke_all_for_user(session: Session, *, user_id: UUID) -> int:
+    """Revoke every live token a user holds, across all families. Returns how many.
+
+    The refresh half of "log me out everywhere". Bumping `token_version` is the
+    other half and belongs to the caller, because it is a fact about the user
+    rather than about these rows.
+
+    Reads its own timestamp, for the reason spelled out in `revoke_family`.
+    """
+    now = datetime.now(UTC)
+    rows = session.scalars(
+        select(RefreshToken).where(
+            RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None)
+        )
+    ).all()
+    for row in rows:
+        row.revoked_at = now
+    return len(rows)

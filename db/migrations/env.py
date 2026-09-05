@@ -17,7 +17,10 @@ from gpca_db.base import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True, which silences every logger
+    # that already exists -- including the application's, when migrations are
+    # run in-process (the api test suite, or a CLI that migrates then serves).
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 database_url = os.environ.get("DATABASE_URL")
 if not database_url:

@@ -54,3 +54,7 @@ class TokenPairResponse(ResponseModel):
     token_type: str = "bearer"
     expires_in: int
     refresh_token: str
+
+
+class RefreshRequest(RequestModel):
+    refresh_token: str = Field(min_length=1, max_length=512)
