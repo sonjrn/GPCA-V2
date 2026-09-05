@@ -1,0 +1,131 @@
+# Local development stack. Run from the repository root:
+#   docker compose -f infra/compose/docker-compose.yml up
+#
+# Four services, matching design 2.2: there is no broker and no worker.
+# Deferred work is a CLI command run by hand (design 11).
+
+name: gpca
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gpca}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gpca}
+      POSTGRES_DB: ${POSTGRES_DB:-gpca}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      # -d as well as -U: without the database name pg_isready reports ready
+      # while the named database is still being created on first boot.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gpca} -d ${POSTGRES_DB:-gpca}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # One-shot: creates the media bucket and makes it public-read, so uploaded
+  # images are servable without presigning every GET (design 5.9).
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+      mc alias set local http://minio:9000 ${S3_ACCESS_KEY_ID:-minioadmin} ${S3_SECRET_ACCESS_KEY:-minioadmin} &&
+      mc mb --ignore-existing local/${S3_BUCKET_MEDIA:-gpca-media} &&
+      mc anonymous set download local/${S3_BUCKET_MEDIA:-gpca-media}
+      "
+    restart: "no"
+
+  # One-shot, and the reason api waits on it: several gunicorn workers each
+  # running `alembic upgrade` would race the schema (design 12.7).
+  migrate:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.api
+      target: runtime
+    working_dir: /app/db
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-gpca}:${POSTGRES_PASSWORD:-gpca}@db:5432/${POSTGRES_DB:-gpca}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.api
+      target: dev
+    # The values below are throwaway defaults for the local stack only. The
+    # production overlay replaces every one with `:?required`.
+    environment:
+      FLASK_ENV: development
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SECRET_KEY: ${SECRET_KEY:-dev-insecure-not-a-real-secret}
+      JWT_SECRET: ${JWT_SECRET:-dev-insecure-not-a-real-secret}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-gpca}:${POSTGRES_PASSWORD:-gpca}@db:5432/${POSTGRES_DB:-gpca}
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET_MEDIA: ${S3_BUCKET_MEDIA:-gpca-media}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+      MEDIA_PUBLIC_BASE_URL: http://localhost:9000/${S3_BUCKET_MEDIA:-gpca-media}
+    volumes:
+      # Editable install in the dev stage, so a save on the host reloads.
+      - ../../api:/src/api
+      - ../../db:/src/db
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # python rather than curl, which the slim image does not carry.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status == 200 else 1)"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  db_data:
+  minio_data:

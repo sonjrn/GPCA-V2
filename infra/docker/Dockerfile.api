@@ -1,0 +1,78 @@
+# syntax=docker/dockerfile:1
+
+# Two install modes, deliberately separate stages:
+#   runtime — the package is copied into the venv, no source tree needed
+#   dev     — an editable install, so a bind-mounted source tree takes effect
+# A single stage cannot do both: an editable install leaves a .pth pointing at
+# /src, which would break the production image the moment /src is absent.
+
+# ---------------------------------------------------------------- base ------
+FROM python:3.14-slim AS base
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+# A fixed high uid, so a bind-mounted volume has predictable ownership and the
+# container never runs as root.
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin app
+
+# ------------------------------------------------------------- builder ------
+FROM base AS builder
+
+# Only in the builder: the runtime image must not carry a compiler. psycopg
+# ships manylinux wheels, so this is insurance for any dependency that arrives
+# as an sdist rather than something currently needed.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY db /src/db
+COPY api /src/api
+
+RUN python -m venv /opt/venv \
+    && pip install /src/db /src/api gunicorn
+
+# ------------------------------------------------------------- runtime ------
+FROM base AS runtime
+
+COPY --from=builder /opt/venv /opt/venv
+
+# Alembic's config and revisions are not part of the installed package -- the
+# wheel contains gpca_db only -- so the migrate container needs them on disk.
+COPY db/alembic.ini /app/db/alembic.ini
+COPY db/migrations /app/db/migrations
+
+WORKDIR /app
+USER app
+EXPOSE 8000
+
+# `app:create_app()` is gunicorn's application-factory syntax. Configuration is
+# read from the environment at startup and the process refuses to boot without
+# it, which is what makes a missing secret a failed deploy rather than a 500.
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "3", "--timeout", "30", \
+     "--access-logfile", "-", "--error-logfile", "-", "app:create_app()"]
+
+# ----------------------------------------------------------------- dev ------
+FROM base AS dev
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY db /src/db
+COPY api /src/api
+
+# Editable, so the bind mount in docker-compose.yml replaces this code and a
+# save on the host is picked up by --reload.
+RUN python -m venv /opt/venv \
+    && pip install -e /src/db -e "/src/api[dev]" gunicorn
+
+WORKDIR /src
+USER app
+EXPOSE 8000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "30", \
+     "--reload", "--access-logfile", "-", "--error-logfile", "-", "app:create_app()"]

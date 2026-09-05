@@ -8,6 +8,11 @@ from app.config import ConfigError, Settings, load_settings
 
 REQUIRED = ("SECRET_KEY", "DATABASE_URL", "JWT_SECRET")
 
+# Clears MIN_SECRET_LENGTH. Short values are rejected, which is the point of
+# test_a_placeholder_secret_is_rejected below.
+VALID_SECRET = "long-enough-to-be-accepted"
+VALID_DB_URL = "postgresql+psycopg://u@localhost/db"
+
 
 @pytest.fixture
 def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -31,8 +36,8 @@ def test_missing_required_variables_raise_naming_them() -> None:
 def test_partial_configuration_names_only_what_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SECRET_KEY", "s")
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u@localhost/db")
+    monkeypatch.setenv("SECRET_KEY", VALID_SECRET)
+    monkeypatch.setenv("DATABASE_URL", VALID_DB_URL)
     with pytest.raises(ConfigError) as exc_info:
         load_settings()
     message = str(exc_info.value)
@@ -44,7 +49,7 @@ def test_partial_configuration_names_only_what_is_missing(
 @pytest.mark.usefixtures("clean_env")
 def test_invalid_value_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in REQUIRED:
-        monkeypatch.setenv(name, "x")
+        monkeypatch.setenv(name, VALID_SECRET)
     monkeypatch.setenv("JWT_ACCESS_TTL_SECONDS", "0")
     with pytest.raises(ConfigError, match="JWT_ACCESS_TTL_SECONDS"):
         load_settings()
@@ -53,15 +58,15 @@ def test_invalid_value_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_secrets_are_not_exposed_by_repr() -> None:
     """A settings object reaching a log or a traceback must not leak keys."""
     settings = Settings(
-        secret_key="super-secret",
-        database_url="postgresql+psycopg://u@localhost/db",
-        jwt_secret="also-secret",
+        secret_key="super-secret-value-here",
+        database_url=VALID_DB_URL,
+        jwt_secret="also-secret-value-here",
     )
     rendered = repr(settings) + str(settings.secret_key) + str(settings.jwt_secret)
-    assert "super-secret" not in rendered
-    assert "also-secret" not in rendered
+    assert "super-secret-value-here" not in rendered
+    assert "also-secret-value-here" not in rendered
     # The real value is still reachable where it is actually needed.
-    assert settings.secret_key.get_secret_value() == "super-secret"
+    assert settings.secret_key.get_secret_value() == "super-secret-value-here"
 
 
 def test_optional_integration_settings_default_to_none() -> None:
@@ -71,9 +76,9 @@ def test_optional_integration_settings_default_to_none() -> None:
     fails for a dependency it never contacts.
     """
     settings = Settings(
-        secret_key="s",
-        database_url="postgresql+psycopg://u@localhost/db",
-        jwt_secret="j",
+        secret_key=VALID_SECRET,
+        database_url=VALID_DB_URL,
+        jwt_secret=VALID_SECRET,
     )
     assert settings.stripe_secret_key is None
     assert settings.s3_bucket_media is None
@@ -88,8 +93,23 @@ def test_settings_are_re_read_not_cached(monkeypatch: pytest.MonkeyPatch) -> Non
     exactly what makes such a cache awkward to test around.
     """
     for name in REQUIRED:
-        monkeypatch.setenv(name, "x")
+        monkeypatch.setenv(name, VALID_SECRET)
     monkeypatch.setenv("LOG_LEVEL", "INFO")
     assert load_settings().log_level == "INFO"
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
     assert load_settings().log_level == "DEBUG"
+
+
+@pytest.mark.usefixtures("clean_env")
+def test_a_placeholder_secret_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reason .env.example ships blank secrets.
+
+    A copied-but-unfilled template must fail at startup rather than boot with
+    an empty signing key.
+    """
+    monkeypatch.setenv("DATABASE_URL", VALID_DB_URL)
+    for placeholder in ("", "changeme", "secret"):
+        monkeypatch.setenv("SECRET_KEY", placeholder)
+        monkeypatch.setenv("JWT_SECRET", VALID_SECRET)
+        with pytest.raises(ConfigError, match="SECRET_KEY"):
+            load_settings()

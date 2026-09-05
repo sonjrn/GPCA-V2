@@ -15,14 +15,17 @@ from app import create_app
 from app.config import Settings
 from app.validation import api_spec
 
-UNREACHABLE_DATABASE_URL = "postgresql+psycopg://user:pw@127.0.0.1:1/nonexistent"
+UNREACHABLE_DATABASE_URL = "postgresql+psycopg://user@127.0.0.1:1/nonexistent"
+
+# Long enough to clear MIN_SECRET_LENGTH, and obviously not a real key.
+TEST_SECRET = "test-value-not-a-real-secret"
 
 
 def make_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
-        "secret_key": "test-secret",
+        "secret_key": TEST_SECRET,
         "database_url": UNREACHABLE_DATABASE_URL,
-        "jwt_secret": "test-jwt-secret",
+        "jwt_secret": TEST_SECRET,
         "db_connect_timeout_seconds": 1,
         "log_level": "CRITICAL",
     }
