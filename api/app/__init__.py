@@ -13,6 +13,7 @@ from app.extensions import init_database
 from app.logging import configure_logging, register_request_id
 from app.routes.auth import bp as auth_bp
 from app.routes.health import bp as health_bp
+from app.routes.me import bp as me_bp
 from app.validation import api_spec
 
 __version__ = "0.1.0"
@@ -49,6 +50,7 @@ def create_app(settings: Settings | None = None) -> Flask:
     app.register_blueprint(health_bp)
 
     app.register_blueprint(auth_bp, url_prefix=f"{API_PREFIX}{auth_bp.url_prefix}")
+    app.register_blueprint(me_bp, url_prefix=f"{API_PREFIX}{me_bp.url_prefix}")
 
     # Last, so the generated document sees every registered route. SpecTree
     # serves its UIs under /docs; see app/validation.py for why that cannot be

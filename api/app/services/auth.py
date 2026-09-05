@@ -437,3 +437,60 @@ def reset_password(session: Session, *, token: str, new_password: str) -> bool:
         context={"first_name": user.first_name},
     )
     return True
+
+
+def update_profile(*, user: User, changes: dict[str, object]) -> User:
+    """Apply a partial profile update.
+
+    `changes` is already `model_dump(exclude_unset=True)`, so a key present
+    with a None value means "clear this" and an absent key means "leave it
+    alone". Only fields declared on MeUpdate can reach here: the wire model
+    has no email, role or status attribute to dump.
+
+    No session argument: `user` is already attached to one, and the caller
+    owns the transaction.
+    """
+    for field, value in changes.items():
+        setattr(user, field, value)
+    return user
+
+
+def change_password(
+    session: Session,
+    *,
+    user: User,
+    current_password: str,
+    new_password: str,
+    settings: Settings,
+    user_agent: str | None = None,
+    ip: str | None = None,
+) -> tuple[str, str, int] | None:
+    """Change a password from inside an authenticated session.
+
+    Requiring the current password is what stops a stolen access token from
+    being upgraded into permanent control of the account -- without it,
+    fifteen minutes of borrowed session becomes a password the real owner
+    does not know.
+
+    Every other session dies, but the caller's does not: someone changing
+    their password in a browser should not be signed out of the browser they
+    are sitting in. That is why a fresh pair is minted here and returned. The
+    `token_version` bump inside `revoke_all_sessions` invalidates the caller's
+    old access token too, so the new pair is not optional for them either.
+    """
+    hasher = get_hasher(settings)
+    if user.password_hash is None or not verify_password(
+        hasher, user.password_hash, current_password
+    ):
+        return None
+
+    user.password_hash = hash_password(hasher, new_password)
+    revoke_all_sessions(session, user=user)
+
+    _deferred_email(
+        to=user.email,
+        template="password_changed",
+        context={"first_name": user.first_name},
+    )
+
+    return issue_session(session, user=user, settings=settings, user_agent=user_agent, ip=ip)

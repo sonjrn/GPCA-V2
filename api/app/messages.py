@@ -43,3 +43,7 @@ RESET_DONE = "Your password has been changed. Sign in again."
 
 # Expired, already used, wrong purpose and never-existed all read the same.
 RESET_FAILED = "That reset link is not valid or has expired. Request a new one."
+
+# Specific on purpose, unlike the others here: the caller is already
+# authenticated as this account, so there is nothing left to reveal.
+WRONG_PASSWORD = "That is not your current password."
