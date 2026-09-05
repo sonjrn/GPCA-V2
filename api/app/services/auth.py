@@ -11,7 +11,6 @@ from uuid import UUID
 
 from argon2 import PasswordHasher
 from flask import current_app, g
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -20,6 +19,8 @@ from app.security.passwords import build_hasher, dummy_verify, hash_password
 from app.security.tokens import hash_refresh_token
 from gpca_db.enums import AuthTokenPurpose, UserRole, UserStatus
 from gpca_db.models import AuthToken, User
+from gpca_db.repositories import auth_tokens as auth_token_repo
+from gpca_db.repositories import users as user_repo
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,7 @@ def get_hasher(settings: Settings | None = None) -> PasswordHasher:
 
 def find_by_email(session: Session, email: str) -> User | None:
     """Live accounts only. A soft-deleted row must not answer a lookup."""
-    return session.scalars(
-        select(User).where(User.email == email, User.deleted_at.is_(None))
-    ).one_or_none()
+    return user_repo.get_by_email(session, email)
 
 
 def issue_single_use_token(
@@ -61,25 +60,17 @@ def issue_single_use_token(
     "resend" click leaves another valid link in circulation.
     """
     now = datetime.now(UTC)
-    outstanding = session.scalars(
-        select(AuthToken).where(
-            AuthToken.user_id == user.id,
-            AuthToken.purpose == purpose,
-            AuthToken.consumed_at.is_(None),
-        )
-    ).all()
-    for row in outstanding:
-        row.consumed_at = now
-    session.flush()
+    auth_token_repo.consume_outstanding(session, user_id=user.id, purpose=purpose, now=now)
 
     plaintext = secrets.token_urlsafe(SINGLE_USE_TOKEN_BYTES)
-    session.add(
+    auth_token_repo.add(
+        session,
         AuthToken(
             user_id=user.id,
             purpose=purpose,
             token_hash=hash_refresh_token(plaintext),
             expires_at=now + ttl,
-        )
+        ),
     )
     return plaintext
 
@@ -116,8 +107,7 @@ def register(
         status=UserStatus.ACTIVE,
         token_version=0,
     )
-    session.add(user)
-    session.flush()
+    user_repo.add(session, user)
 
     token = issue_single_use_token(
         session, user=user, purpose=AuthTokenPurpose.EMAIL_VERIFY, ttl=EMAIL_VERIFY_TTL
@@ -158,4 +148,4 @@ def flush_pending_emails() -> None:
 
 
 def find_user(session: Session, user_id: UUID) -> User | None:
-    return session.get(User, user_id)
+    return user_repo.get(session, user_id)

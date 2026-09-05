@@ -6,10 +6,11 @@ lifecycle and passes the URL in (docs/technical-design.md 12.2). That is what
 lets tests, migrations and background workers each construct their own.
 """
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-__all__ = ["build_engine", "build_session_factory"]
+__all__ = ["build_engine", "build_session_factory", "is_reachable"]
 
 
 def build_engine(
@@ -58,3 +59,21 @@ def build_session_factory(engine: Engine) -> sessionmaker[Session]:
     response model from the object it already has (12.3).
     """
     return sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
+
+
+def is_reachable(engine: Engine) -> bool:
+    """Can a connection be checked out and used? For the readiness probe.
+
+    Lives here rather than in repositories/ because it asks about the
+    connection rather than about any table -- but it is still SQL, and SQL
+    does not belong in a route (design 2.3, rule 4).
+
+    Swallows SQLAlchemyError deliberately: a probe reports a boolean, and an
+    unreachable database is the answer it exists to give, not an error.
+    """
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        return False
+    return True

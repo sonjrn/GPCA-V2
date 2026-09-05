@@ -1,0 +1,17 @@
+# Inherits every rule from the root config, then adds the boundary that keeps
+# query construction out of the service layer (docs/technical-design.md §2.3,
+# rule 4: "Queries live only in db/.../repositories/").
+#
+# Ruff applies the nearest config to each file, so these bans apply to api/ only.
+# They catch the import; the method-call forms (session.scalars, session.get)
+# are caught by tests/test_query_boundary.py, since ruff cannot see through a
+# variable to know it holds a Session.
+
+extend = "../ruff.toml"
+
+[lint.flake8-tidy-imports.banned-api]
+"sqlalchemy.select".msg = "Queries live in db/gpca_db/repositories/. Call a repository function instead (design 2.3, rule 4)."
+"sqlalchemy.insert".msg = "Queries live in db/gpca_db/repositories/. Call a repository function instead (design 2.3, rule 4)."
+"sqlalchemy.update".msg = "Queries live in db/gpca_db/repositories/. Call a repository function instead (design 2.3, rule 4)."
+"sqlalchemy.delete".msg = "Queries live in db/gpca_db/repositories/. Call a repository function instead (design 2.3, rule 4)."
+"sqlalchemy.text".msg = "Raw SQL belongs in db/. See gpca_db.session.is_reachable for the readiness probe."

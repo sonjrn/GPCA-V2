@@ -45,6 +45,13 @@ known-first-party = ["app", "gpca_db"]
 # Same reasoning: TokenExpired/TokenInvalid read better at the raise site than
 # TokenExpiredError, and they sit under a TokenError base that does carry it.
 "api/app/security/tokens.py" = ["N818"]
+# api/ruff.toml bans query construction in the API layer. Tests may query
+# directly: one asserting "the row really landed" should check the database
+# rather than ask the same repository it is exercising, since reading through
+# the abstraction under test would hide a bug in it. Lives here rather than in
+# api/ruff.toml because a per-file-ignores table in a child config replaces
+# this one instead of merging with it.
+"api/tests/**" = ["TID251"]
 
 [format]
 docstring-code-format = true
