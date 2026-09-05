@@ -16,8 +16,9 @@ from alembic.config import Config
 from sqlalchemy.orm import Session
 
 from gpca_db.enums import AuthTokenPurpose, UserRole, UserStatus
-from gpca_db.models import AuthToken, User
+from gpca_db.models import AuthToken, RefreshToken, User
 from gpca_db.repositories import auth_tokens as auth_token_repo
+from gpca_db.repositories import refresh_tokens as refresh_token_repo
 from gpca_db.repositories import users as user_repo
 from gpca_db.session import build_engine, build_session_factory, is_reachable
 
@@ -42,6 +43,7 @@ def session(_schema: None) -> Iterator[Session]:
     engine = build_engine(DATABASE_URL or "")
     factory = build_session_factory(engine)
     with factory() as session:
+        session.query(RefreshToken).delete()
         session.query(AuthToken).delete()
         session.query(User).delete()
         session.commit()
@@ -236,3 +238,99 @@ def test_is_reachable_is_false_when_nothing_is_listening() -> None:
         assert is_reachable(engine) is False
     finally:
         engine.dispose()
+
+
+def _refresh(user: User, digest: bytes, **fields: object) -> RefreshToken:
+    row = RefreshToken(
+        user_id=user.id,
+        token_hash=digest,
+        expires_at=datetime.now(UTC) + timedelta(days=30),
+    )
+    for key, value in fields.items():
+        setattr(row, key, value)
+    return row
+
+
+def test_refresh_get_by_hash_finds_a_revoked_row(session: Session) -> None:
+    """Deliberately unfiltered on revoked_at: finding an already-revoked row is
+    how reuse is detected, so filtering here would delete the feature."""
+    user = user_repo.add(session, _user())
+    refresh_token_repo.add(session, _refresh(user, b"r" * 32, revoked_at=datetime.now(UTC)))
+    session.flush()
+
+    found = refresh_token_repo.get_by_hash(session, b"r" * 32)
+    assert found is not None
+    assert found.revoked_at is not None
+
+
+def test_refresh_get_by_hash_returns_none_for_an_unknown_digest(session: Session) -> None:
+    assert refresh_token_repo.get_by_hash(session, b"q" * 32) is None
+
+
+def test_revoke_family_takes_the_whole_lineage(session: Session) -> None:
+    user = user_repo.add(session, _user())
+    first = refresh_token_repo.add(session, _refresh(user, b"1" * 32))
+    session.flush()
+    refresh_token_repo.add(session, _refresh(user, b"2" * 32, family_id=first.family_id))
+    session.flush()
+
+    now = datetime.now(UTC)
+    assert refresh_token_repo.revoke_family(session, family_id=first.family_id, now=now) == 2
+
+    for digest in (b"1" * 32, b"2" * 32):
+        row = refresh_token_repo.get_by_hash(session, digest)
+        assert row is not None
+        assert row.revoked_at == now
+
+
+def test_revoke_family_leaves_other_families_alone(session: Session) -> None:
+    """Blast radius: a compromised chain must not sign the user out of a
+    device that had nothing to do with it."""
+    user = user_repo.add(session, _user())
+    compromised = refresh_token_repo.add(session, _refresh(user, b"3" * 32))
+    refresh_token_repo.add(session, _refresh(user, b"4" * 32))
+    session.flush()
+
+    refresh_token_repo.revoke_family(
+        session, family_id=compromised.family_id, now=datetime.now(UTC)
+    )
+
+    untouched = refresh_token_repo.get_by_hash(session, b"4" * 32)
+    assert untouched is not None
+    assert untouched.revoked_at is None
+
+
+def test_revoke_family_skips_already_revoked_rows(session: Session) -> None:
+    user = user_repo.add(session, _user())
+    row = refresh_token_repo.add(session, _refresh(user, b"5" * 32, revoked_at=datetime.now(UTC)))
+    session.flush()
+
+    assert (
+        refresh_token_repo.revoke_family(session, family_id=row.family_id, now=datetime.now(UTC))
+        == 0
+    )
+
+
+def test_revoke_all_for_user_crosses_families(session: Session) -> None:
+    user = user_repo.add(session, _user())
+    refresh_token_repo.add(session, _refresh(user, b"6" * 32))
+    refresh_token_repo.add(session, _refresh(user, b"7" * 32))
+    session.flush()
+
+    assert (
+        refresh_token_repo.revoke_all_for_user(session, user_id=user.id, now=datetime.now(UTC)) == 2
+    )
+
+
+def test_revoke_all_for_user_leaves_other_users_alone(session: Session) -> None:
+    user = user_repo.add(session, _user())
+    other = user_repo.add(session, _user(email="grace@example.org"))
+    refresh_token_repo.add(session, _refresh(user, b"8" * 32))
+    refresh_token_repo.add(session, _refresh(other, b"9" * 32))
+    session.flush()
+
+    refresh_token_repo.revoke_all_for_user(session, user_id=user.id, now=datetime.now(UTC))
+
+    survivor = refresh_token_repo.get_by_hash(session, b"9" * 32)
+    assert survivor is not None
+    assert survivor.revoked_at is None

@@ -30,3 +30,7 @@ LOGIN_FAILED = "Those credentials are not valid."
 VERIFY_FAILED = "That verification link is not valid. Request a new one."
 
 VERIFIED = "Your email address is verified."
+
+# Unknown and replayed refresh tokens return this same text, so presenting a
+# stolen token reveals nothing about whether it was ever real.
+REFRESH_FAILED = "That refresh token is not valid. Sign in again."

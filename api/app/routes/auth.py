@@ -5,11 +5,12 @@ from spectree import Response as SpecResponse
 
 from app import errors, messages
 from app.extensions import session_scope
-from app.responses import ok, respond
+from app.responses import no_content, ok, respond
 from app.schemas.auth import (
     AcceptedResponse,
     LoginRequest,
     MessageResponse,
+    RefreshRequest,
     RegisterRequest,
     TokenPairResponse,
     VerifyEmailRequest,
@@ -109,3 +110,71 @@ def login() -> Response:
         raise errors.Unauthorized(messages.LOGIN_FAILED) from exc
 
     return ok(TokenPairResponse(access_token=access, expires_in=expires_in, refresh_token=refresh))
+
+
+@bp.post("/refresh")
+@api_spec.validate(
+    json=RefreshRequest,
+    resp=SpecResponse(HTTP_200=TokenPairResponse, HTTP_401=MessageResponse),
+    tags=["auth"],
+)
+def refresh() -> Response:
+    payload: RefreshRequest = request.context.json  # type: ignore[attr-defined]
+    settings = current_app.config["SETTINGS"]
+
+    # The rejection is caught inside the transaction, not around it. Reuse
+    # detection revokes the whole family as a side effect of failing, and
+    # letting the exception unwind session_scope would roll that revocation
+    # back -- leaving the compromised chain alive at exactly the moment it
+    # must not be. So the scope exits cleanly and commits, and the 401 is
+    # raised afterwards.
+    issued: tuple[str, str, int] | None = None
+    with session_scope() as session:
+        try:
+            issued = auth_service.rotate_refresh_token(
+                session,
+                token=payload.refresh_token,
+                settings=settings,
+                user_agent=request.headers.get("User-Agent"),
+                ip=request.remote_addr,
+            )
+        except errors.RefreshRejected:
+            issued = None
+
+    if issued is None:
+        raise errors.Unauthorized(messages.REFRESH_FAILED)
+
+    access, refresh_token, expires_in = issued
+    return ok(
+        TokenPairResponse(access_token=access, expires_in=expires_in, refresh_token=refresh_token)
+    )
+
+
+@bp.post("/logout")
+@api_spec.validate(json=RefreshRequest, resp=SpecResponse(HTTP_204=None), tags=["auth"])
+def logout() -> Response:
+    """204 whatever happened.
+
+    No access token is required: a client whose access token has already
+    expired still needs to be able to burn its refresh token.
+    """
+    payload: RefreshRequest = request.context.json  # type: ignore[attr-defined]
+
+    with session_scope() as session:
+        auth_service.revoke_refresh_token(session, token=payload.refresh_token)
+
+    return no_content()
+
+
+@bp.post("/logout-all")
+@require_auth
+@api_spec.validate(resp=SpecResponse(HTTP_204=None), tags=["auth"])
+def logout_all() -> Response:
+    """Sign out of every device, including this one."""
+    user = current_user()
+
+    with session_scope() as session:
+        attached = session.merge(user)
+        auth_service.revoke_all_sessions(session, user=attached)
+
+    return no_content()

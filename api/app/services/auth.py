@@ -14,7 +14,7 @@ from flask import current_app, g
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.errors import AuthenticationFailed
+from app.errors import AuthenticationFailed, RefreshRejected
 from app.integrations.email import send_email
 from app.security.passwords import (
     build_hasher,
@@ -290,3 +290,100 @@ def authenticate(
     user.last_login_at = datetime.now(UTC)
 
     return issue_session(session, user=user, settings=settings, user_agent=user_agent, ip=ip)
+
+
+def _live_refresh_token(session: Session, *, token: str) -> RefreshToken | None:
+    return refresh_token_repo.get_by_hash(session, hash_refresh_token(token))
+
+
+def rotate_refresh_token(
+    session: Session,
+    *,
+    token: str,
+    settings: Settings,
+    user_agent: str | None = None,
+    ip: str | None = None,
+) -> tuple[str, str, int]:
+    """Exchange a refresh token for a new pair.
+
+    Single use: the presented token is revoked and linked to its replacement.
+
+    Presenting an ALREADY revoked token means one of two things -- an attacker
+    replaying a stolen token, or a legitimate client retrying after its
+    replacement was issued. The server cannot tell them apart, so it assumes
+    the worse one and revokes the whole family. That logs the real user out of
+    this lineage, which is the correct outcome: they re-authenticate and the
+    thief's copy dies with it. Revoking only the presented row would leave an
+    attacker holding a valid descendant.
+
+    The family revocation is written to the session *before* the rejection is
+    raised, so the caller must commit the transaction rather than let the
+    exception roll it back -- see the route.
+    """
+    row = _live_refresh_token(session, token=token)
+    if row is None:
+        raise RefreshRejected
+
+    if row.revoked_at is not None:
+        revoked = refresh_token_repo.revoke_family(
+            session, family_id=row.family_id, now=datetime.now(UTC)
+        )
+        logger.warning(
+            "refresh token reuse detected; revoking family",
+            extra={
+                "user_id": str(row.user_id),
+                "family_id": str(row.family_id),
+                "tokens_revoked": revoked,
+            },
+        )
+        raise RefreshRejected
+
+    if row.expires_at <= datetime.now(UTC):
+        # Ordinary expiry, not an attack: do not revoke the family for it.
+        raise RefreshRejected
+
+    user = user_repo.get(session, row.user_id)
+    if user is None or user.deleted_at is not None or user.status is not UserStatus.ACTIVE:
+        raise RefreshRejected
+
+    row.revoked_at = datetime.now(UTC)
+    access, plaintext, expires_in = issue_session(
+        session,
+        user=user,
+        settings=settings,
+        family_id=row.family_id,
+        user_agent=user_agent,
+        ip=ip,
+    )
+    # issue_session staged this row and refresh_token_repo.add flushed it, so
+    # a miss here means that contract broke. The original select().one()
+    # raised on the same condition; an assert would not, under `python -O`.
+    replacement = refresh_token_repo.get_by_hash(session, hash_refresh_token(plaintext))
+    if replacement is None:  # pragma: no cover - unreachable unless flush stops working
+        raise RuntimeError("refresh token was issued but not persisted")
+    row.replaced_by_id = replacement.id
+
+    return access, plaintext, expires_in
+
+
+def revoke_refresh_token(session: Session, *, token: str) -> None:
+    """Log out one session.
+
+    Revoking an already-revoked token is a success. A client cleaning up
+    should not get an error, and a 4xx would tell an attacker their stolen
+    token had already been burned.
+    """
+    row = _live_refresh_token(session, token=token)
+    if row is not None and row.revoked_at is None:
+        row.revoked_at = datetime.now(UTC)
+
+
+def revoke_all_sessions(session: Session, *, user: User) -> None:
+    """Log out everywhere.
+
+    Bumping token_version is the half people forget: revoking refresh tokens
+    alone leaves any already-issued access token working for up to its full
+    lifetime, so "log me out everywhere" would not actually do that.
+    """
+    refresh_token_repo.revoke_all_for_user(session, user_id=user.id, now=datetime.now(UTC))
+    user.token_version += 1
