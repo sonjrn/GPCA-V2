@@ -9,6 +9,9 @@ it (design 12.7).
 from pydantic import Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+MIN_SECRET_LENGTH = 16
+"""Short enough not to annoy, long enough that a placeholder fails."""
+
 
 class ConfigError(RuntimeError):
     """Raised at startup when the environment is incomplete or invalid."""
@@ -24,9 +27,13 @@ class Settings(BaseSettings):
     )
 
     # --- required: the process must not start without these ---
-    secret_key: SecretStr
-    database_url: str
-    jwt_secret: SecretStr
+    #
+    # min_length is what stops an empty or token value from being accepted.
+    # infra/env/.env.example ships these blank on purpose, so without a floor
+    # a copied-but-unfilled file would boot with an empty signing key.
+    secret_key: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
+    database_url: str = Field(min_length=1)
+    jwt_secret: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
 
     # --- core, with sensible defaults ---
     flask_env: str = "production"

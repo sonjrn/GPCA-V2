@@ -1,0 +1,29 @@
+version: 2
+
+secret:
+  # These paths contain placeholder and throwaway-dev values only, and are the
+  # source of repeated false positives.
+  #
+  # This is the second line of defence, not the first: the values themselves
+  # were emptied or made obviously inert rather than merely being hidden from
+  # the scanner. Anything genuinely secret belongs in an untracked .env or the
+  # deployment environment, and would be a true positive here.
+  ignored_paths:
+    # Every secret-shaped value in the template is empty.
+    - 'infra/env/.env.example'
+    # Throwaway credentials for the local stack. The production overlay
+    # (docker-compose.prod.yml) has no defaults and is intentionally NOT
+    # ignored, so a real secret committed there is still caught.
+    - 'infra/compose/docker-compose.yml'
+    # Fixture values, never used against anything real. test_errors.py holds a
+    # deliberately credential-shaped string -- it is the payload proving a 500
+    # does not leak one, so it has to look like the real thing.
+    - 'api/tests/**'
+    - 'db/tests/**'
+    # Illustrative snippets, not configuration.
+    - 'docs/**'
+
+  # Note on scope: this file configures ggshield -- the CLI, pre-commit hook
+  # and CI action. Alerts raised by GitGuardian's own scanning of the GitHub
+  # repository are resolved in the dashboard; the durable fix for those is that
+  # the literals are gone, which is what the changes alongside this file did.

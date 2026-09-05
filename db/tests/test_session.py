@@ -8,7 +8,7 @@ from sqlalchemy import Engine
 
 from gpca_db.session import build_engine, build_session_factory
 
-UNREACHABLE_URL = "postgresql+psycopg://user:pw@127.0.0.1:1/nonexistent"
+UNREACHABLE_URL = "postgresql+psycopg://user@127.0.0.1:1/nonexistent"
 
 
 def test_engine_construction_does_not_connect() -> None:

@@ -80,11 +80,13 @@ services:
       context: ../..
       dockerfile: infra/docker/Dockerfile.api
       target: dev
+    # The values below are throwaway defaults for the local stack only. The
+    # production overlay replaces every one with `:?required`.
     environment:
       FLASK_ENV: development
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      SECRET_KEY: ${SECRET_KEY:-dev-only-change-me}
-      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
+      SECRET_KEY: ${SECRET_KEY:-dev-insecure-not-a-real-secret}
+      JWT_SECRET: ${JWT_SECRET:-dev-insecure-not-a-real-secret}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-gpca}:${POSTGRES_PASSWORD:-gpca}@db:5432/${POSTGRES_DB:-gpca}
       S3_ENDPOINT_URL: http://minio:9000
       S3_BUCKET_MEDIA: ${S3_BUCKET_MEDIA:-gpca-media}
