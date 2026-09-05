@@ -6,8 +6,6 @@ the variable, rather than surfacing as a 500 on whichever request first needs
 it (design 12.7).
 """
 
-from functools import lru_cache
-
 from pydantic import Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -28,7 +26,6 @@ class Settings(BaseSettings):
     # --- required: the process must not start without these ---
     secret_key: SecretStr
     database_url: str
-    redis_url: str
     jwt_secret: SecretStr
 
     # --- core, with sensible defaults ---
@@ -46,6 +43,10 @@ class Settings(BaseSettings):
     # --- optional until the features that need them land ---
     # These become required alongside their integrations rather than blocking
     # startup now for code that does not exist yet.
+    #
+    # Redis is here rather than above for the same reason: nothing reads it
+    # today. It becomes required when rate limiting and the job queue land.
+    redis_url: str | None = None
     s3_endpoint_url: str | None = None
     s3_bucket_media: str | None = None
     s3_access_key_id: SecretStr | None = None
@@ -77,8 +78,3 @@ def load_settings() -> Settings:
             "Invalid configuration. Fix these environment variables "
             "(see infra/env/.env.example):\n" + "\n".join(problems)
         ) from exc
-
-
-@lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    return load_settings()

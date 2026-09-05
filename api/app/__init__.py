@@ -6,7 +6,7 @@ Imports gpca_db; nothing in gpca_db imports this package.
 
 from flask import Flask
 
-from app.config import Settings, get_settings
+from app.config import Settings, load_settings
 from app.errors import register_error_handlers
 from app.extensions import init_database
 from app.logging import configure_logging, register_request_id
@@ -23,8 +23,12 @@ def create_app(settings: Settings | None = None) -> Flask:
 
     Configuration is resolved first: an incomplete environment raises here,
     at startup, rather than on the first request that needs the missing value.
+
+    Settings are read once and stored on the application, so anything needing
+    them later reads `current_app.config["SETTINGS"]` rather than re-parsing
+    the environment.
     """
-    settings = settings or get_settings()
+    settings = settings or load_settings()
 
     configure_logging(settings.log_level)
 

@@ -6,7 +6,7 @@ import pytest
 
 from app.config import ConfigError, Settings, load_settings
 
-REQUIRED = ("SECRET_KEY", "DATABASE_URL", "REDIS_URL", "JWT_SECRET")
+REQUIRED = ("SECRET_KEY", "DATABASE_URL", "JWT_SECRET")
 
 
 @pytest.fixture
@@ -36,9 +36,9 @@ def test_partial_configuration_names_only_what_is_missing(
     with pytest.raises(ConfigError) as exc_info:
         load_settings()
     message = str(exc_info.value)
-    assert "REDIS_URL" in message
     assert "JWT_SECRET" in message
     assert "SECRET_KEY" not in message
+    assert "DATABASE_URL" not in message
 
 
 @pytest.mark.usefixtures("clean_env")
@@ -55,7 +55,6 @@ def test_secrets_are_not_exposed_by_repr() -> None:
     settings = Settings(
         secret_key="super-secret",
         database_url="postgresql+psycopg://u@localhost/db",
-        redis_url="redis://localhost:6379/0",
         jwt_secret="also-secret",
     )
     rendered = repr(settings) + str(settings.secret_key) + str(settings.jwt_secret)
@@ -66,13 +65,32 @@ def test_secrets_are_not_exposed_by_repr() -> None:
 
 
 def test_optional_integration_settings_default_to_none() -> None:
-    """Stripe, S3 and SES are not required until their features exist."""
+    """Redis, Stripe, S3 and SES are not required until their features exist.
+
+    Requiring a variable for code that does not run yet means a deployment
+    fails for a dependency it never contacts.
+    """
     settings = Settings(
         secret_key="s",
         database_url="postgresql+psycopg://u@localhost/db",
-        redis_url="redis://localhost:6379/0",
         jwt_secret="j",
     )
+    assert settings.redis_url is None
     assert settings.stripe_secret_key is None
     assert settings.s3_bucket_media is None
     assert settings.ses_from_address is None
+
+
+@pytest.mark.usefixtures("clean_env")
+def test_settings_are_re_read_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """load_settings() reflects the current environment every call.
+
+    A cached settings factory would hand back a stale object here, which is
+    exactly what makes such a cache awkward to test around.
+    """
+    for name in REQUIRED:
+        monkeypatch.setenv(name, "x")
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+    assert load_settings().log_level == "INFO"
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    assert load_settings().log_level == "DEBUG"
