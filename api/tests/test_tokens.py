@@ -6,10 +6,9 @@ from uuid import uuid4
 import jwt
 import pytest
 
+from app.errors import TokenExpired, TokenInvalid
 from app.security.tokens import (
     AccessClaims,
-    TokenExpired,
-    TokenInvalid,
     decode_access_token,
     generate_refresh_token,
     hash_refresh_token,

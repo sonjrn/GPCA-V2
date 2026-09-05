@@ -1,4 +1,18 @@
-"""Error types and their RFC 9457 problem+json representation (design 3.4)."""
+"""Every error the backend can raise. The wording lives in app.messages.
+
+Two kinds, kept apart deliberately:
+
+1. **HTTP errors.** AppError subclasses. Raising one produces a problem+json
+   response with that status (design 3.4). These are the only errors a client
+   ever observes.
+2. **Internal signals.** Raised by a service, caught by its caller, never
+   rendered. A service says *what happened*; the caller decides what the
+   client is told.
+
+The signals are not AppError subclasses on purpose. Inheriting one would make
+it possible to let a service exception escape to the error handler and become
+a response nobody chose -- the split is what forces a route to translate.
+"""
 
 import logging
 from typing import Any
@@ -67,6 +81,40 @@ class ValidationFailed(AppError):
 
 class TooManyRequests(AppError):
     status, title, slug = 429, "Too Many Requests", "rate-limited"
+
+
+# --------------------------------------------------------------------------
+# Internal signals. Never rendered; a caller translates each into an HTTP
+# error above.
+# --------------------------------------------------------------------------
+
+
+class ConfigError(RuntimeError):
+    """Raised at startup when the environment is incomplete or invalid.
+
+    Never reaches a client: it happens before the app can serve anything.
+    """
+
+
+class TokenError(Exception):
+    """Base for anything wrong with a presented token."""
+
+
+class TokenExpired(TokenError):
+    """Distinguished from other failures so a client knows to refresh."""
+
+
+class TokenInvalid(TokenError):
+    """Malformed, wrong signature, or wrong shape."""
+
+
+class AuthenticationFailed(Exception):
+    """Raised for every login failure, without distinguishing which.
+
+    Wrong password, unknown address, suspended account and deleted account all
+    produce this. Anything more specific turns login into an oracle for which
+    addresses hold accounts.
+    """
 
 
 def problem_response(

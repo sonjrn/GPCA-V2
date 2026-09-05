@@ -66,9 +66,24 @@ def _user(**fields: object) -> User:
 
 def test_add_flushes_so_the_id_is_readable(session: Session) -> None:
     """Services build related rows in the same unit of work, which needs the
-    id before commit."""
+    id before commit. The column default only runs during the INSERT, so
+    without the flush inside `add` this is None."""
+    assert user_repo.add(session, _user()).id is not None
+
+
+def test_add_flushes_so_a_child_row_can_reference_it(session: Session) -> None:
+    """The reason `add` flushes, and a guard against removing it.
+
+    SQLAlchemy orders pending inserts by ORM `relationship()`. This schema
+    declares none, so a raw ForeignKey column tells the unit of work nothing
+    and it will INSERT a child before its parent. Without the flush inside
+    `add`, the token below fails on fk_auth_tokens_user_id_users.
+    """
     user = user_repo.add(session, _user())
-    assert user.id is not None
+    auth_token_repo.add(session, _token(user, AuthTokenPurpose.EMAIL_VERIFY, b"p" * 32))
+    session.flush()
+
+    assert auth_token_repo.get_by_hash(session, b"p" * 32) is not None
 
 
 def test_get_by_email_finds_a_live_account(session: Session) -> None:

@@ -45,6 +45,9 @@ known-first-party = ["app", "gpca_db"]
 # Same reasoning: TokenExpired/TokenInvalid read better at the raise site than
 # TokenExpiredError, and they sit under a TokenError base that does carry it.
 "api/app/security/tokens.py" = ["N818"]
+# AuthenticationFailed reads correctly where it is raised and caught, and the
+# -Error suffix would add nothing.
+"api/app/services/auth.py" = ["N818"]
 # api/ruff.toml bans query construction in the API layer. Tests may query
 # directly: one asserting "the row really landed" should check the database
 # rather than ask the same repository it is exercising, since reading through

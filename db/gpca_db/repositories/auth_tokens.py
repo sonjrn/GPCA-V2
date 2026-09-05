@@ -41,6 +41,13 @@ def consume_outstanding(
 
     `now` is passed in rather than read here so one unit of work stamps every
     row it touches with the same instant.
+
+    The flush at the end is the one place this package still flushes by hand,
+    and it is insurance rather than a fix. SQLAlchemy emits UPDATEs before
+    INSERTs within a mapper, so the replacement INSERT lands after these rows
+    are marked consumed and the partial unique index is satisfied -- but that
+    ordering is observed behaviour, not a documented guarantee, and the cost
+    of being wrong is a failed reissue. Flushing makes it explicit.
     """
     rows = session.scalars(
         select(AuthToken).where(
@@ -56,6 +63,24 @@ def consume_outstanding(
 
 
 def add(session: Session, token: AuthToken) -> AuthToken:
-    """Stage a freshly minted token. The caller owns the transaction."""
+    """Stage a new row and flush. The caller still owns the transaction.
+
+    Two reasons, both of which stop mattering only when someone remembers to
+    flush by hand -- which is why it happens here instead:
+
+    1. The primary key is a Core insert default, so it materializes during
+       the INSERT. Before the flush, `row.id` is None.
+    2. SQLAlchemy sorts pending inserts by ORM `relationship()`, and this
+       schema declares none yet, so a raw ForeignKey column tells the unit of
+       work nothing. Left to itself it will INSERT a child before its parent
+       and take a foreign-key violation.
+
+    Autoflush covers neither: it fires before a *query*, and neither reading
+    an attribute nor staging another INSERT is one.
+
+    A flush is not a commit; the caller's transaction still decides whether
+    any of this survives.
+    """
     session.add(token)
+    session.flush()
     return token
