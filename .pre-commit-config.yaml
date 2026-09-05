@@ -34,3 +34,12 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+
+      # Regenerates docs/schema.dbml whenever a model changes, so the diagram
+      # updates itself rather than relying on anyone remembering. CI verifies.
+      - id: schema-dbml
+        name: regenerate schema diagram
+        entry: bash -c 'python -m gpca_db.schema_docs > docs/schema.dbml'
+        language: system
+        files: '^db/gpca_db/(models/|base\.py|types\.py|schema_docs\.py)'
+        pass_filenames: false

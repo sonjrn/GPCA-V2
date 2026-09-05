@@ -1,0 +1,38 @@
+// ---------------------------------------------------------------------------
+// GENERATED FILE -- DO NOT EDIT.
+//
+// The IMPLEMENTED schema: what the migrations have actually built.
+// For the full intended design, most of which is not built yet, see
+// section 5.1 of docs/technical-design.md.
+//
+// Regenerate with:
+//     python -m gpca_db.schema_docs > docs/schema.dbml
+//
+// Paste into https://dbdiagram.io to view it.
+//
+// Tables and relations only -- indexes and enum values are not shown.
+// ---------------------------------------------------------------------------
+// Alembic head: 0002_users
+
+Table users {
+  id uuid [pk]
+  email citext [not null]
+  password_hash text [not null]
+  first_name varchar(100) [not null]
+  last_name varchar(100) [not null]
+  display_name varchar(150)
+  role user_role [not null]
+  status user_status [not null]
+  token_version integer [not null]
+  email_verified_at timestamptz
+  phone varchar(20)
+  city varchar(100)
+  state_province varchar(100)
+  state_code varchar(3)
+  country_code varchar(2)
+  member_since date
+  last_login_at timestamptz
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+}

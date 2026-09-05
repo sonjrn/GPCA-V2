@@ -40,6 +40,14 @@ jobs:
       - run: ruff format --check .
       - run: mypy
 
+      # Same shape as `ruff format --check`: regenerate, fail if it differs
+      # from what was committed, so the diagram cannot go stale.
+      - name: Schema diagram is current
+        run: |
+          python -m gpca_db.schema_docs > docs/schema.dbml
+          git diff --exit-code -- docs/schema.dbml \
+            || { echo "::error::docs/schema.dbml is stale. Regenerate with: python -m gpca_db.schema_docs > docs/schema.dbml"; exit 1; }
+
   test:
     name: Tests
     runs-on: ubuntu-latest

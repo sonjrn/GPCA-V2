@@ -44,8 +44,14 @@ def throwaway_base() -> type[DeclarativeBase]:
 
 
 def test_base_imports_without_a_database() -> None:
+    """Importing Base declares metadata; it must not need a connection.
+
+    This deliberately does not assert that metadata is empty -- that held only
+    while no test had imported a model, and any module that does so populates
+    it for the whole session.
+    """
     assert Base.metadata.naming_convention["pk"] == "pk_%(table_name)s"
-    assert Base.metadata.tables == {}
+    assert Base.type_annotation_map
 
 
 def test_constraint_names_follow_the_convention(
