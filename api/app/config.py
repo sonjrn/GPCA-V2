@@ -43,10 +43,6 @@ class Settings(BaseSettings):
     # --- optional until the features that need them land ---
     # These become required alongside their integrations rather than blocking
     # startup now for code that does not exist yet.
-    #
-    # Redis is here rather than above for the same reason: nothing reads it
-    # today. It becomes required when rate limiting and the job queue land.
-    redis_url: str | None = None
     s3_endpoint_url: str | None = None
     s3_bucket_media: str | None = None
     s3_access_key_id: SecretStr | None = None

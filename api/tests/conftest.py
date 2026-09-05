@@ -21,7 +21,6 @@ def make_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "secret_key": "test-secret",
         "database_url": UNREACHABLE_DATABASE_URL,
-        "redis_url": "redis://127.0.0.1:6379/0",
         "jwt_secret": "test-jwt-secret",
         "db_connect_timeout_seconds": 1,
         "log_level": "CRITICAL",

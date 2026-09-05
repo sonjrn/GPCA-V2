@@ -18,8 +18,9 @@ from gpca_db.session import build_engine, build_session_factory
 ENGINE_KEY = "gpca_engine"
 SESSION_FACTORY_KEY = "gpca_session_factory"
 
-# Redis, S3 and SES clients are initialized here alongside the engine when the
-# features that need them land (#6 onward).
+# S3 and SES clients are initialized here alongside the engine when the
+# features that need them land. There is no broker or cache client: deferred
+# work is an outbox table plus a scheduled CLI command (design 11).
 
 
 def init_database(app: Flask, settings: Settings) -> None:

@@ -60,8 +60,7 @@ These came out of scoping and drive most of the decisions below:
 | Database | PostgreSQL 16 | Extensions: `pgcrypto`, `citext`, `pg_trgm`, `unaccent` |
 | Object storage | S3-compatible (MinIO in dev, S3/R2/Spaces in prod) | |
 | Payments | Stripe (Checkout Sessions + webhooks) | See §9 |
-| Background jobs | RQ + Redis | Small job surface; see §11 |
-| Email | AWS SES (`boto3`) | Transactional only; always enqueued, never sent inline |
+| Email | AWS SES (`boto3`) | Transactional only, sent inline. No queue, broker or worker; see §11 |
 | Server | Gunicorn (sync workers) behind nginx | |
 | Packaging | Docker + Docker Compose | Everything under `infra/` |
 | Repository | Monorepo: `ui/`, `api/`, `db/`, `infra/`, `docs/` | See §2.3 and §12 |
@@ -105,12 +104,11 @@ service layer imports. §2.3 defines that boundary; §12 lays out the directorie
 
 ```
 nginx  →  api (gunicorn/flask)  →  postgres
-                │                └→ redis
-                ├→ worker (rq)
-                └→ s3 / minio
+                                 └→ s3 / minio
 ```
 
-`api` and `worker` run the same image with different entrypoints.
+That is the whole runtime. No broker, no worker, no scheduler — §11 covers why, and what would have
+to change for that to stop being true.
 
 ### 2.3 Layer boundaries and model separation
 
@@ -158,7 +156,7 @@ Rules that make this hold up in practice:
    str_strip_whitespace=True)`. A typo'd field is a 422, not a silently ignored key.
 3. **ORM objects never leave the route function.** They are converted to a response model inside
    the request's session scope. They are never returned from a route, cached, put on `g`, or
-   handed to a background job — jobs receive ids and re-load.
+   captured for a later operation — anything deferred carries ids and re-loads.
 4. **Queries live only in `db/…/repositories/`.** Services call
    `breeder_repo.get_published_by_slug(session, slug)`, not `session.execute(select(...))`. This is
    what makes the eager-loading rule below enforceable in one place instead of scattered across
@@ -226,8 +224,11 @@ Unhandled exceptions log with a request id and return a generic 500 body.
 - Every response carries `X-Request-ID` (echoed from the client or generated), logged with it.
 - Mutating store endpoints accept `Idempotency-Key`; see §9.4.
 - CORS is restricted to the configured frontend origin(s).
-- Rate limits (Flask-Limiter, Redis backend): 5/min on login and password reset, 20/min on
+- Rate limits (Flask-Limiter, in-memory storage): 5/min on login and password reset, 20/min on
   registration and media presign, 100/min default on authenticated writes.
+  In-memory storage means the counters are per gunicorn worker, so the effective limit is roughly
+  the configured value times the worker count. That is fine for slowing credential stuffing on a
+  club site and is not a precise quota; a shared store is the upgrade if it ever needs to be exact.
 
 ---
 
@@ -248,8 +249,8 @@ Unhandled exceptions log with a request id and return a generic 500 body.
 - The access token embeds `role` so most requests need no user lookup. Because a role change would
   otherwise take up to 15 minutes to take effect, a role change or account suspension revokes all of
   that user's refresh tokens and bumps `users.token_version`; `token_version` is a JWT claim and is
-  checked against Redis (`user:{id}:token_version`, warmed from the DB) on every request. That check
-  is a single Redis GET, not a database round trip.
+  compared against the column on every authenticated request. That is one indexed primary-key lookup
+  per request — the kind of thing a cache exists to avoid at scale, and not worth a cache here.
 - Passwords: Argon2id (`argon2-cffi`), parameters in config. Never logged, never returned.
 
 ### 4.2 Roles
@@ -370,7 +371,7 @@ Collapsing these into one enum would put the same fact in two places — a
 `status = 'archived'` beside an `archived_at` column, with nothing keeping them
 in agreement. Splitting them also lets a *draft* be archived, which a
 three-value enum cannot express, and gives every withdrawal a time, which is
-what retention and purge jobs query on.
+what a retention or purge pass queries on, whenever one is run.
 
 Two consequences that must not be forgotten:
 
@@ -410,7 +411,8 @@ Indexes: `UNIQUE(email) WHERE deleted_at IS NULL`; `(role) WHERE status = 'activ
 
 **`refresh_tokens`** — `id`, `user_id`, `token_hash` (`bytea`, unique), `family_id uuid`,
 `issued_at`, `expires_at`, `revoked_at NULL`, `replaced_by_id NULL`, `user_agent`, `ip inet`.
-Index `(user_id, revoked_at)`; a nightly job deletes rows past `expires_at + 30 days`.
+Index `(user_id, revoked_at)`. Expired rows are rejected by their `expires_at`; deleting them is
+housekeeping (`flask maintenance prune-tokens`, §11.2), not correctness.
 
 **`auth_tokens`** — one table for email verification and password reset: `id`, `user_id`,
 `purpose` (`email_verify` | `password_reset`), `token_hash`, `expires_at`, `consumed_at NULL`.
@@ -427,9 +429,10 @@ Initial keys: `membership.fee_cents`, `membership.currency`,
 `membership.required_endorsements` (default 2), `store.currency`,
 `store.reservation_ttl_minutes`, `site.contact_email`.
 
-Reads go through a cached accessor (`settings.get_int("membership.fee_cents")`, 60-second Redis TTL,
-busted on write) so a hot path never hits the table. Every write records an `audit_log` row with the
-previous and new value — a fee change is exactly the kind of thing that gets questioned six months
+Reads go through a typed accessor (`settings.get_int("membership.fee_cents")`) that queries the
+table. It is a single-row primary-key lookup on a table of a dozen rows, which PostgreSQL serves
+from shared buffers; caching it would trade correctness-after-write for nothing measurable. Every
+write records an `audit_log` row with the previous and new value — a fee change is exactly the kind of thing that gets questioned six months
 later.
 
 **`audit_log`** — every privileged action: `id`, `actor_user_id`, `action` (`membership.approved`,
@@ -912,7 +915,7 @@ through a static US/CA subdivision table shipped in code.
 
 ## 8. Media pipeline
 
-Direct-to-S3 upload keeps large files off the API workers:
+Direct-to-S3 upload keeps large file bodies off the API process entirely:
 
 1. `POST /api/v1/media/uploads` with `{filename, content_type, byte_size}`.
    The API authorizes (role + intended use), validates the content type against an allowlist
@@ -922,10 +925,16 @@ Direct-to-S3 upload keeps large files off the API workers:
 2. The client `PUT`s the bytes straight to S3.
 3. `POST /api/v1/media/{id}/complete`. The API `HEAD`s the object to confirm it exists and that the
    real size and content type match what was declared, reads image dimensions, sets `status='ready'`,
-   and enqueues variant generation. **The declared content type is not trusted** — the server sniffs
+   and generates the derivatives. **The declared content type is not trusted** — the server sniffs
    magic bytes on the first 512 bytes it fetches.
-4. A worker produces `thumb` (400px), `card` (800px), and `hero` (1600px) WebP derivatives into
-   `media_variants`.
+4. `thumb` (400px), `card` (800px) and `hero` (1600px) WebP derivatives are written to
+   `media_variants` **during that same request**.
+
+   Resizing three sizes of a ≤10 MB image takes a second or two, and it happens on a request the
+   uploader is already waiting on — their own upload — rather than on a page view. That is the whole
+   reason this does not need a queue. If it ever becomes too slow, the fix is to make derivatives
+   lazy (generate on first request for a size, cache in `media_variants`), which still needs no
+   broker.
 
 Responses embed media as an object, never a bare id:
 
@@ -939,8 +948,9 @@ Responses embed media as an object, never a bare id:
 }
 ```
 
-Orphan cleanup: a nightly job deletes `pending` rows older than 24 h (with their S3 objects) and
-`ready` rows that no entity references and that are older than 7 days. Reference counting is by
+Orphan cleanup is `flask maintenance cleanup-media` (§11.2), run when convenient: it deletes
+`pending` rows older than 24 h with their S3 objects, and `ready` rows older than 7 days that no
+entity references. Nothing breaks while orphans sit there — they cost storage, not correctness. Reference counting is by
 query across the FK columns and the `content_blocks.media_id` denormalization — which is precisely
 why that column exists.
 
@@ -988,9 +998,14 @@ checks availability, and inserts reservations. On `payment_intent.succeeded` the
 `CHECK (stock_quantity >= 0)` constraint is the backstop: if it ever fires, the sale is refunded and
 flagged rather than allowed to oversell.
 
-Reservations expire after 30 minutes. A job releases expired reservations and cancels the
-corresponding `pending_payment` orders; a late-arriving webhook for a canceled order re-checks
-stock and, if it can no longer be honored, refunds automatically and notifies an admin.
+Reservations expire after 30 minutes, and **expiry is lazy**: the availability query counts only
+reservations with `expires_at > now()`, so an abandoned checkout stops holding stock the moment it
+lapses, with nothing having to run. That is deliberate — correctness must not depend on a scheduled
+job having fired.
+
+Clearing the dead rows and canceling their `pending_payment` orders is housekeeping, not
+correctness: a `flask maintenance expire-reservations` command run when convenient (§11.2). A late-arriving webhook for a canceled order re-checks stock and, if it
+can no longer be honored, refunds automatically and notifies an admin.
 
 ### 9.4 Idempotency
 
@@ -999,8 +1014,11 @@ stock and, if it can no longer be honored, refunds automatically and notifies an
   aggressively; this makes retries free.
 - **Outbound Stripe calls:** pass an `Idempotency-Key` derived from our own object id
   (`order:{id}:session`), so a retried checkout never creates a second session.
-- **Client requests:** `POST /checkout` accepts an `Idempotency-Key` header; the response is cached
-  in Redis for 24 h keyed on `(user_or_cart, key)`.
+- **Client requests:** `POST /checkout` accepts an `Idempotency-Key` header. The key and its
+  response are stored in an `idempotency_keys` table (`key`, `scope`, `response_status`,
+  `response_body jsonb`, `created_at`), unique on `(scope, key)`. Rows older than 24 h are ignored on
+  read and deleted by `prune-tokens` when it runs. The unique constraint is what makes a concurrent
+  retry safe, which a cache with a TTL cannot guarantee.
 - **Signature verification:** every webhook body is verified with
   `stripe.Webhook.construct_event` against `STRIPE_WEBHOOK_SECRET` before parsing. The raw body is
   required, so that route reads `request.get_data()`, not the parsed JSON.
@@ -1157,39 +1175,87 @@ payment and endorsements arrive does not matter.
 | PATCH | `/media/{id}` | O | Alt text / caption |
 | DELETE | `/media/{id}` | O | Only if unreferenced |
 | GET | `/health` | – | Liveness. **Unversioned** — infrastructure, not part of the client contract, so it does not move when `/api/v2` arrives |
-| GET | `/health/ready` | – | Readiness: DB + Redis + S3 reachability. Also unversioned |
+| GET | `/health/ready` | – | Readiness: DB + S3 reachability. Also unversioned |
 | GET | `/openapi.json` | – | Generated spec |
 
 ---
 
-## 11. Background jobs and email
+## 11. Email and housekeeping
 
-RQ over Redis. The job surface is small enough that Celery's extra machinery is not worth it, and
-`worker` runs the same image as `api`.
+**No queue, no outbox, no worker, no scheduler.** Email is sent inline, in the request that causes
+it. Nothing in this system runs on a timer.
 
-| Job | Trigger | Work |
-| --- | --- | --- |
-| `send_email` | Enqueued | Transactional email via AWS SES (`boto3`) |
-| `generate_media_variants` | On `media/complete` | Resize to thumb/card/hero, write `media_variants` |
-| `release_expired_reservations` | Cron, every 5 min | Release holds, cancel stale `pending_payment` orders |
-| `cleanup_media` | Cron, nightly | Delete orphaned pending/unreferenced media |
-| `prune_tokens` | Cron, nightly | Delete expired refresh and auth tokens |
-| `retry_failed_webhooks` | Cron, every 15 min | Re-process `webhook_events` with `status='failed'` |
+That is defensible here because of one property: **the database is the source of truth and email is
+only a notification.** Every message this app sends has a recovery path that does not involve the
+message arriving.
 
-Emails (Jinja templates, plain text + HTML): verification, password reset, endorsement request,
-endorsement responded, application submitted, application approved/rejected, order confirmation, shipping confirmation, refund issued, admin digest of
-applications awaiting review.
+| Email | If it is lost |
+| --- | --- |
+| Address verification | The user clicks resend |
+| Password reset | The user requests another |
+| Endorsement request | The application shows the sponsor as `pending`; the applicant re-sends or nominates someone else |
+| Application approved / rejected | The decision is on their application page |
+| Order confirmation | The order is in the database and on their orders page; an admin can resend |
 
-Email sending is always enqueued, never inline — an SES timeout must not fail a checkout.
+Nothing becomes *wrong* when an email fails — only less convenient. A queue exists to make delivery
+reliable, and delivery here is not load-bearing.
 
-**SES specifics.** `SendEmailV2` through `boto3`, not SMTP, so bounces and complaints come back as
-SNS notifications; a `POST /webhooks/ses` endpoint (SNS signature-verified) records them in an
-`email_suppressions` table (`email`, `type` (`bounce`|`complaint`), `reason`, `created_at`) and the
-send job skips suppressed addresses. Ignoring that feedback loop is the usual way a domain's
-sending reputation dies. A configuration set with event publishing is set at the identity level;
-production requires SES production access (out of the sandbox) and DKIM + SPF + a DMARC record on
-the sending domain, which is a DNS task worth starting early since propagation and AWS review both
-take days.
+### 11.1 The three rules that make inline sending safe
+
+1. **Send after commit, never inside the transaction.** A message about an order that then rolls
+   back is worse than no message.
+2. **A failed send must never fail the operation.** The call is wrapped; a failure is logged at
+   error level with the request id and nothing else happens. The account is still created, the
+   payment is still recorded.
+3. **Never send from a path that gets retried.** The Stripe webhook is the one that matters: if the
+   handler raises after marking an order paid, Stripe retries and the customer gets two
+   confirmations. Rule 2 already prevents that, and it is the reason rule 2 is not optional.
+
+The cost is honest and small: a send adds roughly 100–300 ms to the request that triggers it, and a
+transient SES failure means that email is simply gone. Both are acceptable for a club site.
+
+### 11.2 Housekeeping
+
+A few things accumulate. **None of them affect correctness**, so none of them need to run on a
+schedule — they are `flask` subcommands run by hand, or from cron later if the volume ever warrants
+it, alongside `flask seed dev` and `flask users create-admin`.
+
+| Command | What accumulates without it |
+| --- | --- |
+| `flask maintenance prune-tokens` | Expired refresh, verification and reset rows. Already rejected by their `expires_at`, just not deleted |
+| `flask maintenance expire-reservations` | Lapsed stock reservation rows. Already excluded from availability by the `expires_at` filter (§9.3) |
+| `flask maintenance cleanup-media` | Orphaned uploads that were never attached to anything |
+
+Two things deliberately absent:
+
+- **No webhook retry job.** Stripe retries a failed webhook itself for about three days, which is
+  strictly better than anything we would write.
+- **No reservation sweeper as a correctness mechanism.** Expiry is lazy by design (§9.3): the
+  availability query filters on `expires_at`, so stock frees itself whether or not anything runs.
+
+### 11.3 When this stops being enough
+
+The signals, so the decision gets revisited on evidence rather than nerves: request latency from
+SES becoming visible to users, a lost email that actually costs something, or bulk sending such as
+a members-wide announcement.
+
+The upgrade path is additive and does not touch the schema or the service layer — introduce an
+`outbox_emails` table, have the send helper write to it instead of calling SES, and drain it. That
+is a change to one function. Deferring it costs nothing now.
+
+### 11.4 SES specifics
+
+`SendEmailV2` through `boto3`, not SMTP, so bounces and complaints come back as SNS notifications; a
+`POST /webhooks/ses` endpoint (SNS signature-verified) records them in an `email_suppressions` table
+(`email`, `type` (`bounce` | `complaint`), `reason`, `created_at`) and the send helper skips
+suppressed addresses. Ignoring that feedback loop is the usual way a domain's sending reputation
+dies. A configuration set with event publishing is set at the identity level; production requires
+SES production access (out of the sandbox) and DKIM + SPF + a DMARC record on the sending domain,
+which is a DNS task worth starting early since propagation and AWS review both take days.
+
+Templates (Jinja, plain text + HTML): verification, password reset, endorsement request, endorsement
+responded, application submitted, application approved/rejected, order confirmation, shipping
+confirmation, refund issued.
 
 ---
 
@@ -1206,7 +1272,7 @@ GPCA-V2/
 │   ├── app/
 │   │   ├── __init__.py          # create_app() factory
 │   │   ├── config.py            # pydantic-settings, env-driven, validated at boot
-│   │   ├── extensions.py        # session factory, limiter, redis, s3, ses clients
+│   │   ├── extensions.py        # session factory, limiter, s3 and ses clients
 │   │   ├── errors.py            # AppError hierarchy + problem+json handlers
 │   │   ├── routes/v1/           # blueprints: auth, membership, breeders, events,
 │   │   │                        #   activities, pages, store, media, admin, webhooks
@@ -1214,7 +1280,7 @@ GPCA-V2/
 │   │   ├── services/            # business rules, transaction boundaries, state machines
 │   │   ├── security/            # jwt, argon2, decorators, authorization
 │   │   ├── integrations/        # stripe_client, s3_client, ses_client
-│   │   ├── jobs/                # rq tasks
+│   │   ├── maintenance/         # housekeeping CLI subcommands, run by hand
 │   │   ├── content/schemas.py   # PAGE_SCHEMAS registry (§5.8)
 │   │   ├── settings_defs.py     # SETTING_DEFS registry (§5.3)
 │   │   └── cli.py               # flask seed / users create-admin
@@ -1535,9 +1601,9 @@ Seed data ships as Alembic revisions where it is structural (`content_blocks` fr
 ### 12.7 Deployment
 
 Multi-stage Dockerfiles under `infra/docker/` (build wheels → slim runtime, non-root user).
-Gunicorn with `--workers $(2*CPU+1) --timeout 30`. `api` and `worker` share an image and differ only
-by entrypoint. Migrations run as a one-shot container before the API rolls, so concurrent workers
-cannot race the schema. Config is entirely environment-driven and validated at boot by
+Gunicorn with `--workers $(2*CPU+1) --timeout 30`. Migrations run as a one-shot container before the
+API rolls, so concurrent gunicorn workers cannot race the schema. There is no second long-running
+process to supervise: `flask maintenance` is invoked by hand from the same image when needed. Config is entirely environment-driven and validated at boot by
 `pydantic-settings`; the process refuses to start with a missing secret rather than failing on the
 first request.
 
@@ -1601,7 +1667,9 @@ optional location (§5.7).
 | Generated `tsvector` columns | Trigger-maintained columns, or an external search service | Cannot drift; no extra infrastructure at this data scale |
 | Page schemas in code | Admin-authored page types | Matches the requirement: fixed structure per page type, new types are a dev request |
 | Separate image/link tables per entity | One polymorphic attachments table | Real foreign keys and cascades; duplication absorbed by mixins |
-| RQ | Celery | Six jobs; RQ is a fraction of the operational surface |
+| Email sent inline; no queue, outbox or worker | RQ/Celery with Redis, or a Postgres outbox drained on a schedule | The database is the source of truth and email is only a notification — every message has a recovery path that does not need it to arrive. One container instead of four. Adding an outbox later changes one function and no schema |
+| Lazy reservation expiry | A sweeper job that releases holds | Correctness must not depend on a scheduled job having fired; the availability query filters on `expires_at`, so the command is only housekeeping |
+| Idempotency keys in Postgres | A Redis cache with a TTL | A unique constraint makes a concurrent retry safe; a TTL cache does not |
 | `db/` separate from `api/`, enforced by packaging | One `app/` package with a `models/` folder | Makes the ORM/wire-model split structural — `db/` cannot import Flask or Pydantic because it does not depend on them |
 | Distinct SQLAlchemy and Pydantic model families | Generated schemas (`sqlalchemy-pydantic`, `SQLModel`) | A column rename must not silently change the public API; the duplication is the safety property, not an accident |
 | `lazy="raise"` on every relationship | Default lazy loading | Turns N+1 queries and detached-instance bugs into import-time-obvious errors; forces explicit eager loading in repositories |

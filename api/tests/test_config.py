@@ -65,7 +65,7 @@ def test_secrets_are_not_exposed_by_repr() -> None:
 
 
 def test_optional_integration_settings_default_to_none() -> None:
-    """Redis, Stripe, S3 and SES are not required until their features exist.
+    """Stripe, S3 and SES are not required until their features exist.
 
     Requiring a variable for code that does not run yet means a deployment
     fails for a dependency it never contacts.
@@ -75,7 +75,6 @@ def test_optional_integration_settings_default_to_none() -> None:
         database_url="postgresql+psycopg://u@localhost/db",
         jwt_secret="j",
     )
-    assert settings.redis_url is None
     assert settings.stripe_secret_key is None
     assert settings.s3_bucket_media is None
     assert settings.ses_from_address is None
