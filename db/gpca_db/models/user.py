@@ -68,7 +68,9 @@ class User(TimestampMixin, Base):
 
     __table_args__ = (
         # Partial, so a deleted account stops reserving its address and the
-        # person can register again. A plain UNIQUE would block that forever.
+        # person can register again. A plain UNIQUE would block that forever --
+        # and could not carry the WHERE clause at all, which is why this is a
+        # unique index rather than a UniqueConstraint.
         Index(
             "uq_users_email",
             "email",

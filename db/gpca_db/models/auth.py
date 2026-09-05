@@ -71,6 +71,13 @@ class AuthToken(Base):
     __table_args__ = (
         # Partial: only one live token per purpose per user, so issuing a new
         # one invalidates the outstanding link rather than leaving both live.
+        #
+        # A unique Index rather than a UniqueConstraint because PostgreSQL has
+        # no partial UNIQUE constraint -- the WHERE clause is only available on
+        # an index. Named explicitly so the name can say `live`, which is the
+        # part that matters and the part a generated name cannot express: the
+        # convention would produce uq_auth_tokens_user_id_purpose, which reads
+        # as though the pair were unique outright.
         Index(
             "uq_auth_tokens_user_purpose_live",
             "user_id",
