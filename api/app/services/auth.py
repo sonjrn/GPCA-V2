@@ -14,12 +14,24 @@ from flask import current_app, g
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.errors import AuthenticationFailed
 from app.integrations.email import send_email
-from app.security.passwords import build_hasher, dummy_verify, hash_password
-from app.security.tokens import hash_refresh_token
+from app.security.passwords import (
+    build_hasher,
+    dummy_verify,
+    hash_password,
+    needs_rehash,
+    verify_password,
+)
+from app.security.tokens import (
+    generate_refresh_token,
+    hash_refresh_token,
+    issue_access_token,
+)
 from gpca_db.enums import AuthTokenPurpose, UserRole, UserStatus
-from gpca_db.models import AuthToken, User
+from gpca_db.models import AuthToken, RefreshToken, User
 from gpca_db.repositories import auth_tokens as auth_token_repo
+from gpca_db.repositories import refresh_tokens as refresh_token_repo
 from gpca_db.repositories import users as user_repo
 
 logger = logging.getLogger(__name__)
@@ -203,3 +215,78 @@ def resend_verification(session: Session, *, user: User) -> None:
 
 def find_user(session: Session, user_id: UUID) -> User | None:
     return user_repo.get(session, user_id)
+
+
+def issue_session(
+    session: Session,
+    *,
+    user: User,
+    settings: Settings,
+    family_id: UUID | None = None,
+    user_agent: str | None = None,
+    ip: str | None = None,
+) -> tuple[str, str, int]:
+    """Mint an access token and a refresh token.
+
+    Every authentication method ends here -- password today, federated login
+    or passkeys later -- which is what keeps the session mechanics in one
+    place regardless of how the caller proved who they are.
+    """
+    access_token, _expires_at = issue_access_token(
+        secret=settings.jwt_secret.get_secret_value(),
+        user_id=user.id,
+        role=user.role.value,
+        token_version=user.token_version,
+        ttl_seconds=settings.jwt_access_ttl_seconds,
+    )
+    plaintext, digest = generate_refresh_token()
+
+    row = RefreshToken(
+        user_id=user.id,
+        token_hash=digest,
+        expires_at=datetime.now(UTC) + timedelta(days=settings.jwt_refresh_ttl_days),
+        user_agent=(user_agent or None),
+        ip=(ip or None),
+    )
+    # A login starts a new lineage; a rotation continues the existing one.
+    if family_id is not None:
+        row.family_id = family_id
+    refresh_token_repo.add(session, row)
+
+    return access_token, plaintext, settings.jwt_access_ttl_seconds
+
+
+def authenticate(
+    session: Session,
+    *,
+    email: str,
+    password: str,
+    settings: Settings,
+    user_agent: str | None = None,
+    ip: str | None = None,
+) -> tuple[str, str, int]:
+    """Verify credentials and open a session, or raise AuthenticationFailed."""
+    hasher = get_hasher(settings)
+    user = find_by_email(session, email)
+
+    if user is None or user.password_hash is None:
+        # Burn comparable time. Without this the unknown-address branch skips
+        # Argon2 and returns sooner, and the uniform error message is undone
+        # by a stopwatch.
+        dummy_verify(hasher)
+        raise AuthenticationFailed
+
+    if not verify_password(hasher, user.password_hash, password):
+        raise AuthenticationFailed
+
+    if user.status is not UserStatus.ACTIVE:
+        raise AuthenticationFailed
+
+    # Parameters may have been raised since this hash was written; upgrade it
+    # now that the plaintext is in hand, rather than invalidating the password.
+    if needs_rehash(hasher, user.password_hash):
+        user.password_hash = hash_password(hasher, password)
+
+    user.last_login_at = datetime.now(UTC)
+
+    return issue_session(session, user=user, settings=settings, user_agent=user_agent, ip=ip)

@@ -15,22 +15,12 @@ from uuid import UUID, uuid4
 
 import jwt
 
+from app.errors import TokenExpired, TokenInvalid
+
 # 256 bits of entropy. Long enough that guessing is not a strategy.
 REFRESH_TOKEN_BYTES = 32
 
 ALGORITHM = "HS256"
-
-
-class TokenError(Exception):
-    """Base for anything wrong with a presented token."""
-
-
-class TokenExpired(TokenError):
-    """Distinguished from other failures so a client knows to refresh."""
-
-
-class TokenInvalid(TokenError):
-    """Malformed, wrong signature, or wrong shape."""
 
 
 @dataclass(frozen=True, slots=True)

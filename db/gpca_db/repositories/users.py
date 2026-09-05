@@ -38,9 +38,22 @@ def get_by_email(session: Session, email: str) -> User | None:
 
 
 def add(session: Session, user: User) -> User:
-    """Stage a new user and flush, so its generated id is readable.
+    """Stage a new row and flush. The caller still owns the transaction.
 
-    The flush is not a commit: the caller's transaction still decides whether
+    Two reasons, both of which stop mattering only when someone remembers to
+    flush by hand -- which is why it happens here instead:
+
+    1. The primary key is a Core insert default, so it materializes during
+       the INSERT. Before the flush, `row.id` is None.
+    2. SQLAlchemy sorts pending inserts by ORM `relationship()`, and this
+       schema declares none yet, so a raw ForeignKey column tells the unit of
+       work nothing. Left to itself it will INSERT a child before its parent
+       and take a foreign-key violation.
+
+    Autoflush covers neither: it fires before a *query*, and neither reading
+    an attribute nor staging another INSERT is one.
+
+    A flush is not a commit; the caller's transaction still decides whether
     any of this survives.
     """
     session.add(user)

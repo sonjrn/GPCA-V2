@@ -29,10 +29,12 @@ __all__ = [
 # Primary key. UUIDv7 is time-ordered, so inserts land at the right-hand edge of
 # the B-tree instead of scattering across it the way v4 does -- the difference
 # shows up as index bloat and write amplification once tables are large.
-# Generated in Python rather than by the database so a new row's id is known
-# before flush, which is what lets services build related rows in one unit of
-# work. uuid7 is standard library as of Python 3.14, which is the floor this
-# project targets.
+# Generated in Python rather than by the database, so building a row never
+# needs a round trip to learn its id. Note that `default` is a Core insert
+# default: SQLAlchemy evaluates it while emitting the INSERT, so the id
+# materializes at flush, not at construction -- which is one of the two
+# reasons every repository `add` flushes. uuid7 is standard library as of
+# Python 3.14, which is the floor this project targets.
 UUIDPk = Annotated[
     UUID,
     mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid7),

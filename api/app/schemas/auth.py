@@ -36,3 +36,21 @@ class VerifyEmailRequest(RequestModel):
 
 class MessageResponse(ResponseModel):
     detail: str
+
+
+class LoginRequest(RequestModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+
+
+class TokenPairResponse(ResponseModel):
+    """What a successful authentication returns.
+
+    The refresh token appears here once and is never returned again: the
+    database holds only its SHA-256 digest.
+    """
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    refresh_token: str

@@ -9,16 +9,14 @@ it (design 12.7).
 from pydantic import Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.errors import ConfigError
+
 MIN_SECRET_LENGTH = 32
 """32 bytes, per RFC 7518 section 3.2 for HS256.
 
 PyJWT warns below this, and it is the floor at which an HMAC key carries as
 much entropy as the hash it feeds. `secrets.token_urlsafe(32)` clears it.
 """
-
-
-class ConfigError(RuntimeError):
-    """Raised at startup when the environment is incomplete or invalid."""
 
 
 class Settings(BaseSettings):

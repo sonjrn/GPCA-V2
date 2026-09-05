@@ -1,14 +1,17 @@
 """Authentication endpoints."""
 
-from flask import Blueprint, Response, request
+from flask import Blueprint, Response, current_app, request
 from spectree import Response as SpecResponse
 
+from app import errors, messages
 from app.extensions import session_scope
 from app.responses import ok, respond
 from app.schemas.auth import (
     AcceptedResponse,
+    LoginRequest,
     MessageResponse,
     RegisterRequest,
+    TokenPairResponse,
     VerifyEmailRequest,
 )
 from app.security.decorators import current_user, require_auth
@@ -16,11 +19,6 @@ from app.services import auth as auth_service
 from app.validation import api_spec
 
 bp = Blueprint("auth", __name__, url_prefix="/auth")
-
-# The same body for every outcome. A distinct response for "already
-# registered" would turn this endpoint into a membership oracle for the whole
-# club roster.
-_ACCEPTED = "If that address can be registered, we have sent a message to it."
 
 
 @bp.post("/register")
@@ -45,15 +43,14 @@ def register() -> Response:
     # worse than no email at all.
     auth_service.flush_pending_emails()
 
-    return respond(AcceptedResponse(detail=_ACCEPTED), 202)
+    return respond(AcceptedResponse(detail=messages.ACCEPTED), 202)
 
 
 # Already-verified is a success, not an error: people double-click links and
 # forward the email to themselves, and a scary failure for a no-op is worse
 # than useless. An unredeemable token is still a 400 -- it genuinely did not
-# work -- but says nothing about whether it ever existed.
-_VERIFIED = "Your email address is verified."
-_VERIFY_FAILED = "That verification link is not valid. Request a new one."
+# work -- but says nothing about whether it ever existed. The wording lives in
+# app.errors with every other client-visible string.
 
 
 @bp.post("/verify-email")
@@ -69,8 +66,8 @@ def verify_email() -> Response:
         redeemed = auth_service.verify_email(session, token=payload.token)
 
     if not redeemed:
-        return respond(MessageResponse(detail=_VERIFY_FAILED), 400)
-    return ok(MessageResponse(detail=_VERIFIED))
+        return respond(MessageResponse(detail=messages.VERIFY_FAILED), 400)
+    return ok(MessageResponse(detail=messages.VERIFIED))
 
 
 @bp.post("/verify-email/resend")
@@ -85,4 +82,30 @@ def resend_verification() -> Response:
         auth_service.resend_verification(session, user=attached)
 
     auth_service.flush_pending_emails()
-    return respond(AcceptedResponse(detail=_ACCEPTED), 202)
+    return respond(AcceptedResponse(detail=messages.ACCEPTED), 202)
+
+
+@bp.post("/login")
+@api_spec.validate(
+    json=LoginRequest,
+    resp=SpecResponse(HTTP_200=TokenPairResponse, HTTP_401=MessageResponse),
+    tags=["auth"],
+)
+def login() -> Response:
+    payload: LoginRequest = request.context.json  # type: ignore[attr-defined]
+    settings = current_app.config["SETTINGS"]
+
+    try:
+        with session_scope() as session:
+            access, refresh, expires_in = auth_service.authenticate(
+                session,
+                email=str(payload.email),
+                password=payload.password,
+                settings=settings,
+                user_agent=request.headers.get("User-Agent"),
+                ip=request.remote_addr,
+            )
+    except errors.AuthenticationFailed as exc:
+        raise errors.Unauthorized(messages.LOGIN_FAILED) from exc
+
+    return ok(TokenPairResponse(access_token=access, expires_in=expires_in, refresh_token=refresh))

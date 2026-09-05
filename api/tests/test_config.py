@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from app.config import ConfigError, Settings, load_settings
+from app.config import Settings, load_settings
+from app.errors import ConfigError
 
 REQUIRED = ("SECRET_KEY", "DATABASE_URL", "JWT_SECRET")
 
