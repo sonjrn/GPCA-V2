@@ -37,5 +37,11 @@ ban-relative-imports = "parents"
 [lint.isort]
 known-first-party = ["app", "gpca_db"]
 
+[lint.per-file-ignores]
+# N818 asks for an -Error suffix on every exception. These are named for the
+# HTTP status they map to, matching docs/technical-design.md 3.4 and reading
+# better where they are raised: `raise NotFound("breeder listing", slug)`.
+"api/app/errors.py" = ["N818"]
+
 [format]
 docstring-code-format = true

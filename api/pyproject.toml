@@ -11,6 +11,11 @@ requires-python = ">=3.14"
 dependencies = [
     "gpca-db",
     "Flask>=3.1",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.4",
+    # Flask glue for Pydantic: validation decorator over ordinary blueprints,
+    # plus an OpenAPI document generated from the same models.
+    "spectree>=2.0.3",
 ]
 
 # Request validation and OpenAPI generation are added in #5, once the
@@ -20,6 +25,10 @@ dev = ["mypy>=1.10", "ruff>=0.5", "pytest>=8.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
 
 # Resolves the sibling package from the working tree for `uv sync`. Plain pip
 # does not read this key; install db first and the requirement is satisfied:

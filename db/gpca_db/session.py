@@ -20,6 +20,7 @@ def build_engine(
     max_overflow: int = 5,
     pool_recycle_seconds: int = 1800,
     pool_pre_ping: bool = True,
+    connect_timeout_seconds: int = 10,
 ) -> Engine:
     """Create an Engine for `url`.
 
@@ -30,6 +31,10 @@ def build_engine(
 
     `pool_recycle_seconds` retires connections before infrastructure between
     the app and PostgreSQL decides to.
+
+    `connect_timeout_seconds` bounds how long a connection attempt may block.
+    libpq's default is minutes, which would let a readiness probe hang instead
+    of reporting the database unreachable.
     """
     return create_engine(
         url,
@@ -38,6 +43,7 @@ def build_engine(
         max_overflow=max_overflow,
         pool_recycle=pool_recycle_seconds,
         pool_pre_ping=pool_pre_ping,
+        connect_args={"connect_timeout": connect_timeout_seconds},
         future=True,
     )
 

@@ -1,0 +1,131 @@
+"""Error types and their RFC 9457 problem+json representation (design 3.4)."""
+
+import logging
+from typing import Any
+
+from flask import Flask, Response, g, jsonify
+from werkzeug.exceptions import HTTPException
+
+logger = logging.getLogger(__name__)
+
+ERROR_TYPE_BASE = "https://api.gpca.org/errors"
+
+
+class AppError(Exception):
+    """Base for errors that map to a deliberate HTTP response."""
+
+    status: int = 500
+    title: str = "Internal Server Error"
+    slug: str = "internal-error"
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        errors: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(detail or self.title)
+        self.detail = detail
+        self.errors = errors
+
+
+class BadRequest(AppError):
+    status, title, slug = 400, "Bad Request", "bad-request"
+
+
+class Unauthorized(AppError):
+    status, title, slug = 401, "Unauthorized", "unauthorized"
+
+
+class PaymentFailed(AppError):
+    status, title, slug = 402, "Payment Failed", "payment-failed"
+
+
+class Forbidden(AppError):
+    status, title, slug = 403, "Forbidden", "forbidden"
+
+
+class NotFound(AppError):
+    status, title, slug = 404, "Not Found", "not-found"
+
+    def __init__(self, resource: str, identifier: object = None) -> None:
+        detail = (
+            f"No {resource} with identifier {identifier!r}."
+            if identifier is not None
+            else f"No such {resource}."
+        )
+        super().__init__(detail)
+
+
+class Conflict(AppError):
+    status, title, slug = 409, "Conflict", "conflict"
+
+
+class ValidationFailed(AppError):
+    status, title, slug = 422, "Validation Error", "validation-error"
+
+
+class TooManyRequests(AppError):
+    status, title, slug = 429, "Too Many Requests", "rate-limited"
+
+
+def problem_response(
+    *,
+    status: int,
+    title: str,
+    slug: str,
+    detail: str | None = None,
+    errors: list[dict[str, Any]] | None = None,
+) -> Response:
+    body: dict[str, Any] = {
+        "type": f"{ERROR_TYPE_BASE}/{slug}",
+        "title": title,
+        "status": status,
+    }
+    if detail:
+        body["detail"] = detail
+    if errors:
+        body["errors"] = errors
+    if (request_id := g.get("request_id")) is not None:
+        body["request_id"] = request_id
+
+    response = jsonify(body)
+    response.status_code = status
+    # RFC 9457 media type, not application/json, so clients can distinguish an
+    # error body from a successful one without inspecting the payload.
+    response.mimetype = "application/problem+json"
+    return response
+
+
+def register_error_handlers(app: Flask) -> None:
+    @app.errorhandler(AppError)
+    def _handle_app_error(error: AppError) -> Response:
+        return problem_response(
+            status=error.status,
+            title=error.title,
+            slug=error.slug,
+            detail=error.detail,
+            errors=error.errors,
+        )
+
+    @app.errorhandler(HTTPException)
+    def _handle_http_exception(error: HTTPException) -> Response:
+        # Werkzeug's own 404/405/413 and friends, rendered in the same shape.
+        return problem_response(
+            status=error.code or 500,
+            title=error.name,
+            slug=(error.name or "error").lower().replace(" ", "-"),
+            detail=error.description,
+        )
+
+    @app.errorhandler(Exception)
+    def _handle_unexpected(_error: Exception) -> Response:
+        # Log the traceback with the request id, return nothing about it. An
+        # exception message can carry a query, a path or a credential.
+        logger.exception("unhandled exception", extra={"request_id": g.get("request_id")})
+        return problem_response(
+            status=500,
+            title="Internal Server Error",
+            slug="internal-error",
+            detail="An unexpected error occurred.",
+        )
