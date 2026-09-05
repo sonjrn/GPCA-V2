@@ -147,5 +147,59 @@ def flush_pending_emails() -> None:
             logger.exception("failed to send queued email")
 
 
+def consume_single_use_token(
+    session: Session, *, token: str, purpose: AuthTokenPurpose
+) -> User | None:
+    """Redeem a token, or return None if it cannot be redeemed.
+
+    `purpose` is checked explicitly rather than assumed from which endpoint
+    was called: a verification token must not reset a password, and a reset
+    token must not verify an address.
+    """
+    row = auth_token_repo.get_by_hash(session, hash_refresh_token(token))
+
+    if row is None or row.purpose is not purpose:
+        return None
+    if row.consumed_at is not None:
+        return None
+    if row.expires_at <= datetime.now(UTC):
+        return None
+
+    user = user_repo.get(session, row.user_id)
+    if user is None or user.deleted_at is not None:
+        return None
+
+    row.consumed_at = datetime.now(UTC)
+    return user
+
+
+def verify_email(session: Session, *, token: str) -> bool:
+    """Mark an address verified. True when the token was redeemed."""
+    user = consume_single_use_token(session, token=token, purpose=AuthTokenPurpose.EMAIL_VERIFY)
+    if user is None:
+        return False
+    if user.email_verified_at is None:
+        user.email_verified_at = datetime.now(UTC)
+    return True
+
+
+def resend_verification(session: Session, *, user: User) -> None:
+    """Issue a fresh verification link.
+
+    A no-op for an already-verified account: re-sending would be a way to make
+    the application mail an arbitrary verified address on demand.
+    """
+    if user.email_verified_at is not None:
+        return
+    token = issue_single_use_token(
+        session, user=user, purpose=AuthTokenPurpose.EMAIL_VERIFY, ttl=EMAIL_VERIFY_TTL
+    )
+    _deferred_email(
+        to=user.email,
+        template="verify_email",
+        context={"first_name": user.first_name, "token": token},
+    )
+
+
 def find_user(session: Session, user_id: UUID) -> User | None:
     return user_repo.get(session, user_id)
