@@ -1,0 +1,200 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push supersedes the run in flight for the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Both packages declare requires-python >=3.14, so this is not merely a
+  # preference: an older interpreter cannot install them.
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  quality:
+    name: Lint, format, types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+
+      - name: Install
+        run: |
+          uv venv --python "$PYTHON_VERSION"
+          uv pip install -e ./db -e "./api[dev]"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - run: ruff check --output-format=github .
+      - run: ruff format --check .
+      - run: mypy
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          # trust auth, so this file carries no credential for a scanner to
+          # flag and no password to keep in step with the connection URL.
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: gpca
+          POSTGRES_DB: gpca_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gpca -d gpca_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://gpca@localhost:5432/gpca_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+
+      - name: Install
+        run: |
+          uv venv --python "$PYTHON_VERSION"
+          uv pip install -e ./db -e "./api[dev]"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      # Confirms the Python version actually under test, since the whole
+      # 3.14 decision rests on this stack running there.
+      - name: Report interpreter and key versions
+        run: |
+          python -VV
+          python -c "import pydantic, sqlalchemy, flask; print('pydantic', pydantic.VERSION); print('sqlalchemy', sqlalchemy.__version__); print('flask', flask.__version__)"
+
+      # The db suite builds its schema by running Alembic rather than
+      # create_all, so migrations are exercised on every test run.
+      - name: db tests
+        run: pytest db/tests -q --cov=gpca_db --cov-report=term-missing
+
+      # Run from api/ so `from tests.conftest import ...` resolves the same
+      # way it does locally.
+      - name: api tests
+        working-directory: api
+        run: pytest tests -q --cov=app --cov-report=term-missing
+
+  migrations:
+    name: Migration integrity
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: gpca
+          POSTGRES_DB: gpca_migrations
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gpca -d gpca_migrations"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://gpca@localhost:5432/gpca_migrations
+    defaults:
+      run:
+        working-directory: db
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+
+      - name: Install
+        working-directory: .
+        run: |
+          uv venv --python "$PYTHON_VERSION"
+          uv pip install -e ./db
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Exactly one head
+        run: |
+          heads=$(alembic heads | grep -c . || true)
+          echo "heads: $heads"
+          test "$heads" -eq 1
+
+      - name: Upgrade to head
+        run: alembic upgrade head
+
+      # The check that earns this job: fails when a model was changed without
+      # a migration, which is invisible until someone deploys.
+      - name: No model/migration drift
+        run: alembic check
+
+      - name: Downgrade to base and back
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+
+  build:
+    name: Container build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Both targets: the dev stage is what developers run, so a break there
+      # should fail the PR rather than the next person's `compose up`.
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.api
+          target: runtime
+          push: false
+          load: true
+          tags: gpca-api:runtime
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.api
+          target: dev
+          push: false
+          tags: gpca-api:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image runs as a non-root user
+        run: |
+          uid=$(docker run --rm gpca-api:runtime id -u)
+          echo "uid: $uid"
+          test "$uid" != "0"
+
+      - name: Compose files render
+        run: |
+          docker compose -f infra/compose/docker-compose.yml config >/dev/null
+          SECRET_KEY=ci-placeholder-value JWT_SECRET=ci-placeholder-value \
+          POSTGRES_USER=u POSTGRES_PASSWORD=p POSTGRES_DB=d \
+          DATABASE_URL=postgresql+psycopg://u@db/d \
+          STRIPE_SECRET_KEY=x STRIPE_WEBHOOK_SECRET=x \
+          SES_FROM_ADDRESS=a@b.c AWS_REGION=us-east-1 \
+          docker compose -f infra/compose/docker-compose.yml \
+                         -f infra/compose/docker-compose.prod.yml config >/dev/null

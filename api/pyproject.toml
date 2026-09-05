@@ -21,7 +21,7 @@ dependencies = [
 # Request validation and OpenAPI generation are added in #5, once the
 # Pydantic-vs-marshmallow decision is settled. Nothing here should presume it.
 [project.optional-dependencies]
-dev = ["mypy>=1.10", "ruff>=0.5", "pytest>=8.0"]
+dev = ["mypy>=1.10", "ruff>=0.5", "pytest>=8.0", "pytest-cov>=5.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
