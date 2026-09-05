@@ -58,3 +58,12 @@ class TokenPairResponse(ResponseModel):
 
 class RefreshRequest(RequestModel):
     refresh_token: str = Field(min_length=1, max_length=512)
+
+
+class ForgotPasswordRequest(RequestModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(RequestModel):
+    token: str = Field(min_length=1, max_length=512)
+    new_password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=MAX_PASSWORD_LENGTH)

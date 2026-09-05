@@ -34,3 +34,12 @@ VERIFIED = "Your email address is verified."
 # Unknown and replayed refresh tokens return this same text, so presenting a
 # stolen token reveals nothing about whether it was ever real.
 REFRESH_FAILED = "That refresh token is not valid. Sign in again."
+
+# Returned whether or not the address has an account, for the same reason
+# ACCEPTED is.
+RESET_REQUESTED = "If that address has an account, we have sent a reset link to it."
+
+RESET_DONE = "Your password has been changed. Sign in again."
+
+# Expired, already used, wrong purpose and never-existed all read the same.
+RESET_FAILED = "That reset link is not valid or has expired. Request a new one."
