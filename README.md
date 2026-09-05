@@ -81,5 +81,46 @@ missing value fails startup rather than the first request that needs it.
 
 ## Running it
 
-Docker and Compose land in #6, CI in #7. Until then this tree is a shell:
-the packages install and the checks pass, but there is no application to run.
+```bash
+cp infra/env/.env.example .env      # optional: the dev stack has defaults
+docker compose -f infra/compose/docker-compose.yml up --build
+```
+
+That brings up PostgreSQL, MinIO, the API and nginx, running migrations once
+before the API accepts traffic. Then:
+
+| URL | What |
+| --- | --- |
+| http://localhost:8080/health | Through nginx |
+| http://localhost:8000/health/ready | API directly |
+| http://localhost:8000/api/v1/openapi.json | Generated OpenAPI document |
+| http://localhost:9001 | MinIO console (`minioadmin` / `minioadmin`) |
+
+The API runs from an editable install with the source bind-mounted, so a save
+on the host reloads the process.
+
+```bash
+docker compose -f infra/compose/docker-compose.yml down       # keeps data
+docker compose -f infra/compose/docker-compose.yml down -v    # discards it
+```
+
+### Production
+
+```bash
+docker compose -f infra/compose/docker-compose.yml \
+               -f infra/compose/docker-compose.prod.yml up -d
+```
+
+The override switches the API to the non-editable `runtime` image, removes the
+source mount, unpublishes every port except nginx's, and requires each secret
+from the environment with no default — a missing one fails the deploy rather
+than starting a half-configured process.
+
+### Housekeeping
+
+Nothing runs on a schedule (design §11). Occasional cleanup is by hand:
+
+```bash
+docker compose -f infra/compose/docker-compose.yml exec api \
+  flask maintenance prune-tokens
+```
