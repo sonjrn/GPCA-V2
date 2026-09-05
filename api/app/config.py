@@ -9,8 +9,12 @@ it (design 12.7).
 from pydantic import Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-MIN_SECRET_LENGTH = 16
-"""Short enough not to annoy, long enough that a placeholder fails."""
+MIN_SECRET_LENGTH = 32
+"""32 bytes, per RFC 7518 section 3.2 for HS256.
+
+PyJWT warns below this, and it is the floor at which an HMAC key carries as
+much entropy as the hash it feeds. `secrets.token_urlsafe(32)` clears it.
+"""
 
 
 class ConfigError(RuntimeError):
@@ -42,6 +46,14 @@ class Settings(BaseSettings):
 
     jwt_access_ttl_seconds: int = Field(default=900, gt=0)
     jwt_refresh_ttl_days: int = Field(default=30, gt=0)
+
+    # Argon2id. 19 MiB / 2 iterations / 1 lane is the OWASP baseline: ~22 ms
+    # per hash, versus ~272 ms for bcrypt at cost 12. Raise time_cost if the
+    # deployment hardware has room; do not lower memory_cost below 19456, which
+    # is the floor that makes memory-hardness worth having.
+    argon2_memory_cost_kib: int = Field(default=19456, ge=19456)
+    argon2_time_cost: int = Field(default=2, ge=1)
+    argon2_parallelism: int = Field(default=1, ge=1)
 
     # How long a connection attempt may block. Short, because the readiness
     # probe must report a down database rather than hang on libpq's default.

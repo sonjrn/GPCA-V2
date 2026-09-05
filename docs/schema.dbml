@@ -12,12 +12,35 @@
 //
 // Tables and relations only -- indexes and enum values are not shown.
 // ---------------------------------------------------------------------------
-// Alembic head: 0002_users
+// Alembic head: 0003_auth_tokens
+
+Table auth_tokens {
+  id uuid [pk]
+  user_id uuid [not null]
+  purpose auth_token_purpose [not null]
+  token_hash bytea [not null]
+  expires_at timestamptz [not null]
+  consumed_at timestamptz
+  created_at timestamptz [not null]
+}
+
+Table refresh_tokens {
+  id uuid [pk]
+  user_id uuid [not null]
+  token_hash bytea [not null]
+  family_id uuid [not null]
+  issued_at timestamptz [not null]
+  expires_at timestamptz [not null]
+  revoked_at timestamptz
+  replaced_by_id uuid
+  user_agent varchar(400)
+  ip inet
+}
 
 Table users {
   id uuid [pk]
   email citext [not null]
-  password_hash text [not null]
+  password_hash text
   first_name varchar(100) [not null]
   last_name varchar(100) [not null]
   display_name varchar(150)
@@ -36,3 +59,7 @@ Table users {
   created_at timestamptz [not null]
   updated_at timestamptz [not null]
 }
+
+Ref: auth_tokens.user_id > users.id
+Ref: refresh_tokens.replaced_by_id > refresh_tokens.id
+Ref: refresh_tokens.user_id > users.id

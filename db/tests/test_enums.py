@@ -45,7 +45,7 @@ def test_pg_type_stores_values_not_member_names(
 
 def test_every_enum_has_a_paired_pg_type() -> None:
     """A StrEnum with no type object would silently become a varchar column."""
-    assert len(_paired()) == 11
+    assert len(_paired()) == 12
 
 
 def test_cancel_is_spelled_with_one_l_everywhere() -> None:
