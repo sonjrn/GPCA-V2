@@ -15,6 +15,7 @@ from app.extensions import session_scope
 from app.security.tokens import TokenError, TokenExpired, decode_access_token
 from gpca_db.enums import UserRole, UserStatus
 from gpca_db.models import User
+from gpca_db.repositories import users as user_repo
 
 # viewer < member < admin. An ordered comparison, not set membership: an admin
 # satisfies a member requirement without anyone maintaining a list.
@@ -49,7 +50,7 @@ def _load_current_user() -> User:
         raise Unauthorized("Access token is not valid.") from exc
 
     with session_scope() as session:
-        user = session.get(User, claims.user_id)
+        user = user_repo.get(session, claims.user_id)
         if user is None or user.deleted_at is not None:
             raise Unauthorized("Access token is not valid.")
         if user.status is not UserStatus.ACTIVE:

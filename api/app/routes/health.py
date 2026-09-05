@@ -9,13 +9,12 @@ import logging
 
 from flask import Blueprint, Response
 from spectree import Response as SpecResponse
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 
 from app.extensions import get_engine
 from app.responses import ok, respond
 from app.schemas.system import HealthStatus, ReadinessStatus
 from app.validation import api_spec
+from gpca_db.session import is_reachable
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +49,11 @@ def readiness() -> Response:
 
 
 def _database_reachable() -> bool:
-    try:
-        with get_engine().connect() as connection:
-            connection.execute(text("SELECT 1"))
-    except SQLAlchemyError:
-        logger.warning("readiness: database unreachable", exc_info=True)
-        return False
-    return True
+    """Logs on the way through, so a degraded probe leaves a trace.
+
+    The SQL itself lives in gpca_db.session; a route does not write queries.
+    """
+    reachable = is_reachable(get_engine())
+    if not reachable:
+        logger.warning("readiness: database unreachable")
+    return reachable
